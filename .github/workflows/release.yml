@@ -22,47 +22,6 @@ jobs:
         # branch name so artifacts are still distinguishable.
         run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
-  cli:
-    name: Build CLI (${{ matrix.goos }}/${{ matrix.goarch }})
-    needs: meta
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: windows
-            goarch: "386"
-            base: go-dispatch-proxy.win.x86
-            ext: .exe
-          - goos: windows
-            goarch: amd64
-            base: go-dispatch-proxy.win.x64
-            ext: .exe
-          - goos: linux
-            goarch: "386"
-            base: go-dispatch-proxy.linux.x86
-            ext: ""
-          - goos: linux
-            goarch: amd64
-            base: go-dispatch-proxy.linux.x64
-            ext: ""
-    env:
-      ASSET: ${{ matrix.base }}-${{ needs.meta.outputs.version }}${{ matrix.ext }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: go build -ldflags "-s -w" -o "$ASSET" ./cmd/cli
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ASSET }}
-          path: ${{ env.ASSET }}
-
   gui-linux:
     name: Build GUI (linux/amd64)
     needs: meta
@@ -122,7 +81,7 @@ jobs:
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [cli, gui-linux, gui-windows]
+    needs: [gui-linux, gui-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

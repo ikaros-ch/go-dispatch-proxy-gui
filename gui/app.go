@@ -37,7 +37,7 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
-	log.SetOutput(io.MultiWriter(os.Stdout, &eventLogWriter{ctx: ctx}))
+	log.SetOutput(logWriter(ctx))
 }
 
 // eventLogWriter forwards everything written to it (i.e. every log.Println
@@ -47,6 +47,26 @@ type eventLogWriter struct{ ctx context.Context }
 func (w *eventLogWriter) Write(p []byte) (int, error) {
 	wailsruntime.EventsEmit(w.ctx, "log", strings.TrimRight(string(p), "\n"))
 	return len(p), nil
+}
+
+// tolerantMultiWriter writes to every writer even if an earlier one fails,
+// unlike io.MultiWriter which stops at the first error. A production build is
+// compiled for the GUI subsystem and has no valid stdout, so writing to it
+// errors -- with io.MultiWriter that error would suppress the frontend log
+// events entirely.
+type tolerantMultiWriter struct{ writers []io.Writer }
+
+func (w *tolerantMultiWriter) Write(p []byte) (int, error) {
+	for _, dst := range w.writers {
+		_, _ = dst.Write(p)
+	}
+	return len(p), nil
+}
+
+// logWriter builds the log destination: the frontend event stream, plus
+// stdout as a best-effort convenience when a console is attached.
+func logWriter(ctx context.Context) io.Writer {
+	return &tolerantMultiWriter{writers: []io.Writer{os.Stdout, &eventLogWriter{ctx: ctx}}}
 }
 
 // InterfaceInfo mirrors dispatcher.InterfaceInfo for the frontend.
@@ -125,7 +145,7 @@ func (a *App) StartProxy(config ProxyConfig) error {
 	if config.Quiet {
 		log.SetOutput(io.Discard)
 	} else {
-		log.SetOutput(io.MultiWriter(os.Stdout, &eventLogWriter{ctx: a.ctx}))
+		log.SetOutput(logWriter(a.ctx))
 	}
 
 	args := make([]string, len(config.Balancers))
