@@ -32,3 +32,29 @@ jobs:
         with:
           name: go-dispatch-proxy-gui.win.x64-debug
           path: gui/build/bin/go-dispatch-proxy-gui.win.x64-debug.exe
+
+  gui-windows-prod-console:
+    name: Build GUI (windows/amd64, production + console)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gui/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+      # Identical to the release build except a console stays attached, so a
+      # panic or startup error is visible instead of being swallowed by the
+      # windowsgui subsystem.
+      - name: Build GUI (production, console attached)
+        working-directory: gui
+        run: wails build -windowsconsole -clean
+      - name: Rename artifact
+        run: Rename-Item gui/build/bin/gui.exe go-dispatch-proxy-gui.win.x64-prodconsole.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-dispatch-proxy-gui.win.x64-prodconsole
+          path: gui/build/bin/go-dispatch-proxy-gui.win.x64-prodconsole.exe
