@@ -45,14 +45,6 @@ jobs:
             goarch: amd64
             base: go-dispatch-proxy.linux.x64
             ext: ""
-          - goos: darwin
-            goarch: amd64
-            base: go-dispatch-proxy.macos.x64
-            ext: ""
-          - goos: darwin
-            goarch: arm64
-            base: go-dispatch-proxy.macos.arm64
-            ext: ""
     env:
       ASSET: ${{ matrix.base }}-${{ needs.meta.outputs.version }}${{ matrix.ext }}
     steps:
@@ -127,37 +119,10 @@ jobs:
           name: ${{ env.ASSET }}
           path: gui/build/bin/${{ env.ASSET }}
 
-  gui-macos:
-    name: Build GUI (macos/universal)
-    needs: meta
-    runs-on: macos-latest
-    env:
-      ASSET: go-dispatch-proxy-gui.macos.universal-${{ needs.meta.outputs.version }}.zip
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: gui/go.mod
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Install Wails
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
-      - name: Build GUI
-        working-directory: gui
-        run: wails build -platform darwin/universal -clean
-      - name: Zip app bundle
-        working-directory: gui/build/bin
-        run: zip -r "$ASSET" *.app
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ASSET }}
-          path: gui/build/bin/${{ env.ASSET }}
-
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [cli, gui-linux, gui-windows, gui-macos]
+    needs: [cli, gui-linux, gui-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
