@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  cli:
+    name: Build CLI (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: "386"
+            name: go-dispatch-proxy.win.x86.exe
+          - goos: windows
+            goarch: amd64
+            name: go-dispatch-proxy.win.x64.exe
+          - goos: linux
+            goarch: "386"
+            name: go-dispatch-proxy.linux.x86
+          - goos: linux
+            goarch: amd64
+            name: go-dispatch-proxy.linux.x64
+          - goos: darwin
+            goarch: amd64
+            name: go-dispatch-proxy.macos.x64
+          - goos: darwin
+            goarch: arm64
+            name: go-dispatch-proxy.macos.arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: go build -ldflags "-s -w" -o "${{ matrix.name }}" ./cmd/cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
+
+  gui-linux:
+    name: Build GUI (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gui/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config build-essential
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+      - name: Build GUI
+        working-directory: gui
+        run: wails build -tags webkit2_41 -clean
+      - name: Rename artifact
+        run: mv gui/build/bin/gui gui/build/bin/go-dispatch-proxy-gui.linux.x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-dispatch-proxy-gui.linux.x64
+          path: gui/build/bin/go-dispatch-proxy-gui.linux.x64
+
+  gui-windows:
+    name: Build GUI (windows/amd64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gui/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+      - name: Build GUI
+        working-directory: gui
+        run: wails build -clean
+      - name: Rename artifact
+        run: Rename-Item gui/build/bin/gui.exe go-dispatch-proxy-gui.win.x64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-dispatch-proxy-gui.win.x64.exe
+          path: gui/build/bin/go-dispatch-proxy-gui.win.x64.exe
+
+  gui-macos:
+    name: Build GUI (macos/universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gui/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+      - name: Build GUI
+        working-directory: gui
+        run: wails build -platform darwin/universal -clean
+      - name: Zip app bundle
+        working-directory: gui/build/bin
+        run: zip -r go-dispatch-proxy-gui.macos.universal.zip *.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-dispatch-proxy-gui.macos.universal.zip
+          path: gui/build/bin/go-dispatch-proxy-gui.macos.universal.zip
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [cli, gui-linux, gui-windows, gui-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -la release
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
