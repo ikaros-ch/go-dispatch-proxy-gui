@@ -44,8 +44,10 @@ export namespace dispatcher {
 	    IP: string;
 	    InterfaceName: string;
 	    LatencyMs: number;
-	    ThroughputBps: number;
+	    DownloadBps: number;
+	    UploadBps: number;
 	    Error: string;
+	    UploadError: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new TestResult(source);
@@ -56,8 +58,10 @@ export namespace dispatcher {
 	        this.IP = source["IP"];
 	        this.InterfaceName = source["InterfaceName"];
 	        this.LatencyMs = source["LatencyMs"];
-	        this.ThroughputBps = source["ThroughputBps"];
+	        this.DownloadBps = source["DownloadBps"];
+	        this.UploadBps = source["UploadBps"];
 	        this.Error = source["Error"];
+	        this.UploadError = source["UploadError"];
 	    }
 	}
 
@@ -65,6 +69,24 @@ export namespace dispatcher {
 
 export namespace main {
 	
+	export class AppSettings {
+	    startAtLogin: boolean;
+	    startAtLoginSupported: boolean;
+	    startProxyOnLaunch: boolean;
+	    autoMode: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new AppSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.startAtLogin = source["startAtLogin"];
+	        this.startAtLoginSupported = source["startAtLoginSupported"];
+	        this.startProxyOnLaunch = source["startProxyOnLaunch"];
+	        this.autoMode = source["autoMode"];
+	    }
+	}
 	export class LBConfig {
 	    address: string;
 	    contentionRatio: number;
@@ -84,6 +106,7 @@ export namespace main {
 	    lport: number;
 	    tunnel: boolean;
 	    quiet: boolean;
+	    autoMode: boolean;
 	    balancers: LBConfig[];
 	
 	    static createFrom(source: any = {}) {
@@ -96,6 +119,7 @@ export namespace main {
 	        this.lport = source["lport"];
 	        this.tunnel = source["tunnel"];
 	        this.quiet = source["quiet"];
+	        this.autoMode = source["autoMode"];
 	        this.balancers = this.convertValues(source["balancers"], LBConfig);
 	    }
 	
@@ -121,6 +145,7 @@ export namespace main {
 	    running: boolean;
 	    listenAddr: string;
 	    loadBalancers: dispatcher.LoadBalancer[];
+	    autoMode: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Status(source);
@@ -131,6 +156,7 @@ export namespace main {
 	        this.running = source["running"];
 	        this.listenAddr = source["listenAddr"];
 	        this.loadBalancers = this.convertValues(source["loadBalancers"], dispatcher.LoadBalancer);
+	        this.autoMode = source["autoMode"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

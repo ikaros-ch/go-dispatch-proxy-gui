@@ -3,12 +3,22 @@
 import {main} from '../models';
 import {dispatcher} from '../models';
 
+export function GetSettings():Promise<main.AppSettings>;
+
 export function GetStatus():Promise<main.Status>;
 
 export function ListInterfaces():Promise<Array<dispatcher.InterfaceInfo>>;
+
+export function SetAutoMode(arg1:boolean):Promise<void>;
+
+export function SetStartAtLogin(arg1:boolean):Promise<void>;
+
+export function SetStartProxyOnLaunch(arg1:boolean):Promise<void>;
 
 export function StartProxy(arg1:main.ProxyConfig):Promise<void>;
 
 export function StopProxy():Promise<void>;
 
 export function TestConnections(arg1:Array<string>):Promise<main.TestSummary>;
+
+export function TestProxy():Promise<dispatcher.TestResult>;

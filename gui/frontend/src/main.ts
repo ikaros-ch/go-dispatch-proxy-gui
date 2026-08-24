@@ -1,7 +1,18 @@
 import './style.css';
 import './app.css';
 
-import {ListInterfaces, TestConnections, StartProxy, StopProxy, GetStatus} from '../wailsjs/go/main/App';
+import {
+    ListInterfaces,
+    TestConnections,
+    TestProxy,
+    StartProxy,
+    StopProxy,
+    GetStatus,
+    GetSettings,
+    SetStartAtLogin,
+    SetStartProxyOnLaunch,
+    SetAutoMode,
+} from '../wailsjs/go/main/App';
 import {main, dispatcher} from '../wailsjs/go/models';
 import {EventsOn} from '../wailsjs/runtime/runtime';
 
@@ -14,7 +25,8 @@ interface Row {
     enabled: boolean;
     ratio: number;
     latencyMs?: number;
-    throughputBps?: number;
+    downloadBps?: number;
+    uploadBps?: number;
     testError?: string;
 }
 
@@ -29,6 +41,15 @@ let testing = false;
 let starting = false;
 let startError = '';
 let liveStats: dispatcher.LoadBalancer[] = [];
+
+// Settings and proxy self-test state.
+let autoMode = false;
+let startAtLogin = false;
+let startAtLoginSupported = false;
+let startProxyOnLaunch = false;
+let testingProxy = false;
+let proxyResult: dispatcher.TestResult | null = null;
+let proxyTestError = '';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
@@ -65,7 +86,8 @@ async function loadInterfaces() {
             enabled: prev?.enabled ?? true,
             ratio: prev?.ratio ?? 1,
             latencyMs: prev?.latencyMs,
-            throughputBps: prev?.throughputBps,
+            downloadBps: prev?.downloadBps,
+            uploadBps: prev?.uploadBps,
             testError: prev?.testError,
         };
     });
@@ -106,7 +128,10 @@ async function runTests() {
             const result = byIP.get(row.address);
             if (!result) continue;
             row.latencyMs = result.LatencyMs;
-            row.throughputBps = result.ThroughputBps;
+            row.downloadBps = result.DownloadBps;
+            row.uploadBps = result.UploadBps;
+            // An upload failure still leaves a usable download figure, so it
+            // is not treated as the whole test failing.
             row.testError = result.Error || undefined;
         }
         (window as any).__suggestedRatios = summary.suggestedRatios;
@@ -114,6 +139,70 @@ async function runTests() {
         testing = false;
         render();
     }
+}
+
+// runProxyTest measures the proxy end to end, which is only meaningful once
+// it is actually listening.
+async function runProxyTest() {
+    testingProxy = true;
+    proxyTestError = '';
+    render();
+    try {
+        proxyResult = await TestProxy();
+        if (proxyResult?.Error) {
+            proxyTestError = proxyResult.Error;
+        }
+    } catch (err: any) {
+        proxyResult = null;
+        proxyTestError = String(err?.message ?? err);
+    } finally {
+        testingProxy = false;
+        render();
+    }
+}
+
+async function loadSettings() {
+    const settings: main.AppSettings = await GetSettings();
+    startAtLogin = settings.startAtLogin;
+    startAtLoginSupported = settings.startAtLoginSupported;
+    startProxyOnLaunch = settings.startProxyOnLaunch;
+    autoMode = settings.autoMode;
+    render();
+}
+
+async function toggleStartAtLogin(enabled: boolean) {
+    try {
+        await SetStartAtLogin(enabled);
+        startAtLogin = enabled;
+    } catch (err: any) {
+        startError = String(err?.message ?? err);
+    }
+    render();
+}
+
+async function toggleStartProxyOnLaunch(enabled: boolean) {
+    try {
+        await SetStartProxyOnLaunch(enabled);
+        startProxyOnLaunch = enabled;
+    } catch (err: any) {
+        startError = String(err?.message ?? err);
+    }
+    render();
+}
+
+// toggleAutoMode applies immediately when the proxy is running; otherwise it
+// is remembered and takes effect at the next start.
+async function toggleAutoMode(enabled: boolean) {
+    autoMode = enabled;
+    if (running) {
+        try {
+            await SetAutoMode(enabled);
+        } catch (err: any) {
+            startError = String(err?.message ?? err);
+            autoMode = !enabled;
+        }
+    }
+    render();
 }
 
 function applySuggested() {
@@ -148,6 +237,7 @@ async function start() {
             lport,
             tunnel: mode === 'tunnel',
             quiet,
+            autoMode: autoMode && mode === 'normal',
             balancers,
         } as main.ProxyConfig;
         await StartProxy(config);
@@ -176,6 +266,7 @@ async function refreshStatus() {
     running = status.running;
     listenAddr = status.listenAddr;
     liveStats = status.loadBalancers ?? [];
+    autoMode = status.autoMode;
     render();
 }
 
@@ -228,7 +319,8 @@ function render() {
                         <th>${mode === 'normal' ? 'Interface' : 'Endpoint (host:port)'}</th>
                         ${mode === 'normal' ? '<th>IP</th>' : ''}
                         <th>Latency</th>
-                        <th>Throughput</th>
+                        <th>Download</th>
+                        <th>Upload</th>
                         <th>Ratio</th>
                         ${mode === 'tunnel' ? '<th></th>' : ''}
                     </tr>
@@ -260,6 +352,52 @@ function render() {
                 <button class="danger" data-action="stop" ${!running || starting ? 'disabled' : ''}>${starting && running ? 'Stopping…' : 'Stop'}</button>
             </div>
             ${startError ? `<p class="error-text">${escapeHtml(startError)}</p>` : ''}
+
+            ${running ? `
+                <div class="row">
+                    <button data-action="test-proxy" ${testingProxy ? 'disabled' : ''}>${testingProxy ? 'Testing proxy…' : 'Test proxy'}</button>
+                    <span class="hint">Measures speed through the proxy itself, across all load balancers combined.</span>
+                </div>
+                ${proxyTestError ? `<p class="error-text">${escapeHtml(proxyTestError)}</p>` : ''}
+                ${proxyResult && !proxyTestError ? `
+                    <table>
+                        <thead><tr><th>Latency</th><th>Download</th><th>Upload</th></tr></thead>
+                        <tbody>
+                            <tr>
+                                <td class="mono">${proxyResult.LatencyMs.toFixed(0)} ms</td>
+                                <td class="mono">${fmtBps(proxyResult.DownloadBps)}</td>
+                                <td class="mono">${proxyResult.UploadBps ? fmtBps(proxyResult.UploadBps) : '—'}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    ${proxyResult.UploadError ? `<p class="hint">Upload test failed: ${escapeHtml(proxyResult.UploadError)}</p>` : ''}
+                ` : ''}
+            ` : ''}
+        </div>
+
+        <div class="panel">
+            <h2>Automation</h2>
+            <div class="row">
+                <label title="${mode === 'tunnel' ? 'Auto mode applies to local interfaces, not tunnel endpoints.' : ''}">
+                    <input type="checkbox" id="auto-mode" ${autoMode ? 'checked' : ''} ${mode === 'tunnel' ? 'disabled' : ''}/>
+                    Auto mode
+                </label>
+                <span class="hint">Watches for connections appearing or dropping, re-tests speed, and adjusts the running proxy.</span>
+            </div>
+            <div class="row">
+                <label>
+                    <input type="checkbox" id="start-at-login" ${startAtLogin ? 'checked' : ''} ${startAtLoginSupported ? '' : 'disabled'}/>
+                    Start when I sign in
+                </label>
+                ${startAtLoginSupported ? '' : '<span class="hint">Not supported on this platform.</span>'}
+            </div>
+            <div class="row">
+                <label>
+                    <input type="checkbox" id="start-proxy-on-launch" ${startProxyOnLaunch ? 'checked' : ''}/>
+                    Start the proxy automatically on launch
+                </label>
+                <span class="hint">Restores the last saved configuration without opening anything.</span>
+            </div>
         </div>
 
         ${running && liveStats.length > 0 ? `
@@ -297,9 +435,9 @@ function render() {
 }
 
 function rowHtml(row: Row): string {
-    const speed = row.testError
-        ? `<span class="error-text" title="${escapeHtml(row.testError)}">failed</span>`
-        : (row.throughputBps != null ? fmtBps(row.throughputBps) : '—');
+    const failed = `<span class="error-text" title="${escapeHtml(row.testError ?? '')}">failed</span>`;
+    const download = row.testError ? failed : (row.downloadBps != null ? fmtBps(row.downloadBps) : '—');
+    const upload = row.testError ? '—' : (row.uploadBps ? fmtBps(row.uploadBps) : '—');
     const latency = row.testError ? '—' : (row.latencyMs != null ? `${row.latencyMs.toFixed(0)} ms` : '—');
 
     if (mode === 'normal') {
@@ -309,7 +447,8 @@ function rowHtml(row: Row): string {
                 <td>${escapeHtml(row.label)}</td>
                 <td class="mono">${escapeHtml(row.address)}</td>
                 <td class="mono">${latency}</td>
-                <td class="mono">${speed}</td>
+                <td class="mono">${download}</td>
+                <td class="mono">${upload}</td>
                 <td><input type="number" min="1" max="10" data-row="${row.id}" data-field="ratio" value="${row.ratio}" ${running ? 'disabled' : ''}/></td>
             </tr>
         `;
@@ -320,7 +459,8 @@ function rowHtml(row: Row): string {
             <td><input type="checkbox" data-row="${row.id}" data-field="enabled" ${row.enabled ? 'checked' : ''} ${running ? 'disabled' : ''}/></td>
             <td><input type="text" placeholder="127.0.0.1:7777" data-row="${row.id}" data-field="address" value="${escapeHtml(row.address)}" ${running ? 'disabled' : ''}/></td>
             <td class="mono">${latency}</td>
-            <td class="mono">${speed}</td>
+            <td class="mono">${download}</td>
+            <td class="mono">${upload}</td>
             <td><input type="number" min="1" max="10" data-row="${row.id}" data-field="ratio" value="${row.ratio}" ${running ? 'disabled' : ''}/></td>
             <td><button class="link" data-action="remove-row" data-row="${row.id}" ${running ? 'disabled' : ''}>Remove</button></td>
         </tr>
@@ -342,6 +482,7 @@ function wireEvents() {
             else if (action === 'add-row') addTunnelRow();
             else if (action === 'remove-row' && rowId) removeRow(rowId);
             else if (action === 'test') runTests();
+            else if (action === 'test-proxy') runProxyTest();
             else if (action === 'apply-suggested') applySuggested();
             else if (action === 'start') start();
             else if (action === 'stop') stop();
@@ -366,6 +507,13 @@ function wireEvents() {
     lportEl?.addEventListener('change', () => lport = Number(lportEl.value) || 8080);
     const quietEl = document.querySelector<HTMLInputElement>('#quiet');
     quietEl?.addEventListener('change', () => quiet = quietEl.checked);
+
+    const autoEl = document.querySelector<HTMLInputElement>('#auto-mode');
+    autoEl?.addEventListener('change', () => toggleAutoMode(autoEl.checked));
+    const loginEl = document.querySelector<HTMLInputElement>('#start-at-login');
+    loginEl?.addEventListener('change', () => toggleStartAtLogin(loginEl.checked));
+    const launchEl = document.querySelector<HTMLInputElement>('#start-proxy-on-launch');
+    launchEl?.addEventListener('change', () => toggleStartProxyOnLaunch(launchEl.checked));
 }
 
 EventsOn('log', (line: string) => appendLog(line));
@@ -374,5 +522,14 @@ EventsOn('stats', (stats: dispatcher.LoadBalancer[]) => {
     if (running) render();
 });
 
+// Auto mode reconfigured the proxy underneath us; re-read the interface list
+// so the table reflects what is actually dispatching now.
+EventsOn('autoUpdate', (stats: dispatcher.LoadBalancer[]) => {
+    liveStats = stats;
+    loadInterfaces();
+    refreshStatus();
+});
+
 loadInterfaces();
 refreshStatus();
+loadSettings();

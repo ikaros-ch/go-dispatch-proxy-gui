@@ -299,6 +299,54 @@ func (d *Dispatcher) IsRunning() bool {
 	return d.running
 }
 
+// UpdateLoadBalancers swaps the active set of load balancers without
+// interrupting the listener, so connections keep being served while the
+// configuration changes underneath. Accumulated counters are carried over
+// for addresses that survive the change; new addresses start at zero.
+//
+// Connections already dispatched keep using their original load balancer:
+// they hold a pointer into the previous slice, which stays alive until they
+// finish.
+func (d *Dispatcher) UpdateLoadBalancers(lbs []LoadBalancer) error {
+	if len(lbs) == 0 {
+		return errors.New("no load balancers configured")
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	previous := make(map[string]*LoadBalancer, len(d.lbList))
+	for i := range d.lbList {
+		previous[d.lbList[i].Address] = &d.lbList[i]
+	}
+
+	next := make([]LoadBalancer, len(lbs))
+	copy(next, lbs)
+	for i := range next {
+		if old, ok := previous[next[i].Address]; ok {
+			next[i].BytesSent = atomic.LoadUint64(&old.BytesSent)
+			next[i].BytesReceived = atomic.LoadUint64(&old.BytesReceived)
+			next[i].ConnectionsHandled = atomic.LoadUint64(&old.ConnectionsHandled)
+			next[i].LastError = old.LastError
+		}
+	}
+
+	d.lbList = next
+	d.lbIndex = 0
+	return nil
+}
+
+// Addresses returns the address of every configured load balancer.
+func (d *Dispatcher) Addresses() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]string, len(d.lbList))
+	for i := range d.lbList {
+		out[i] = d.lbList[i].Address
+	}
+	return out
+}
+
 // Stats returns a snapshot of every load balancer's current stats.
 func (d *Dispatcher) Stats() []LoadBalancer {
 	d.mu.Lock()

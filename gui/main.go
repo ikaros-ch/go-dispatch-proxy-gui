@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"flag"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -12,7 +13,17 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// autostart is set by the startup entry registered with the OS, telling this
+// instance it was launched at sign-in and should restore the saved proxy.
+var autostart = flag.Bool("autostart", false, "started automatically at login; restore the saved configuration")
+
+// launchedForAutostart reports whether this process was started by the OS
+// startup entry.
+func launchedForAutostart() bool { return *autostart }
+
 func main() {
+	flag.Parse()
+
 	// Create an instance of the app structure
 	app := NewApp()
 

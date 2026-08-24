@@ -35,3 +35,6 @@ const (
 	COMMAND_NOT_SUPPORTED  = iota
 	ADDRTYPE_NOT_SUPPORTED = iota
 )
+
+// socksVersion5 is the only protocol version this proxy speaks.
+const socksVersion5 = 5
