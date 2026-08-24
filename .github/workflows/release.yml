@@ -10,30 +10,51 @@ permissions:
   contents: write
 
 jobs:
+  meta:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        name: Resolve version string
+        # Tag pushes use the tag itself (v0.1.3); manual runs fall back to the
+        # branch name so artifacts are still distinguishable.
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
   cli:
     name: Build CLI (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: meta
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
           - goos: windows
             goarch: "386"
-            name: go-dispatch-proxy.win.x86.exe
+            base: go-dispatch-proxy.win.x86
+            ext: .exe
           - goos: windows
             goarch: amd64
-            name: go-dispatch-proxy.win.x64.exe
+            base: go-dispatch-proxy.win.x64
+            ext: .exe
           - goos: linux
             goarch: "386"
-            name: go-dispatch-proxy.linux.x86
+            base: go-dispatch-proxy.linux.x86
+            ext: ""
           - goos: linux
             goarch: amd64
-            name: go-dispatch-proxy.linux.x64
+            base: go-dispatch-proxy.linux.x64
+            ext: ""
           - goos: darwin
             goarch: amd64
-            name: go-dispatch-proxy.macos.x64
+            base: go-dispatch-proxy.macos.x64
+            ext: ""
           - goos: darwin
             goarch: arm64
-            name: go-dispatch-proxy.macos.arm64
+            base: go-dispatch-proxy.macos.arm64
+            ext: ""
+    env:
+      ASSET: ${{ matrix.base }}-${{ needs.meta.outputs.version }}${{ matrix.ext }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -44,15 +65,18 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
-        run: go build -ldflags "-s -w" -o "${{ matrix.name }}" ./cmd/cli
+        run: go build -ldflags "-s -w" -o "$ASSET" ./cmd/cli
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
-          path: ${{ matrix.name }}
+          name: ${{ env.ASSET }}
+          path: ${{ env.ASSET }}
 
   gui-linux:
     name: Build GUI (linux/amd64)
+    needs: meta
     runs-on: ubuntu-latest
+    env:
+      ASSET: go-dispatch-proxy-gui.linux.x64-${{ needs.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -71,15 +95,18 @@ jobs:
         working-directory: gui
         run: wails build -tags webkit2_41 -clean
       - name: Rename artifact
-        run: mv gui/build/bin/gui gui/build/bin/go-dispatch-proxy-gui.linux.x64
+        run: mv gui/build/bin/gui "gui/build/bin/$ASSET"
       - uses: actions/upload-artifact@v4
         with:
-          name: go-dispatch-proxy-gui.linux.x64
-          path: gui/build/bin/go-dispatch-proxy-gui.linux.x64
+          name: ${{ env.ASSET }}
+          path: gui/build/bin/${{ env.ASSET }}
 
   gui-windows:
     name: Build GUI (windows/amd64)
+    needs: meta
     runs-on: windows-latest
+    env:
+      ASSET: go-dispatch-proxy-gui.win.x64-${{ needs.meta.outputs.version }}.exe
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -94,15 +121,18 @@ jobs:
         working-directory: gui
         run: wails build -clean
       - name: Rename artifact
-        run: Rename-Item gui/build/bin/gui.exe go-dispatch-proxy-gui.win.x64.exe
+        run: Rename-Item gui/build/bin/gui.exe "$env:ASSET"
       - uses: actions/upload-artifact@v4
         with:
-          name: go-dispatch-proxy-gui.win.x64.exe
-          path: gui/build/bin/go-dispatch-proxy-gui.win.x64.exe
+          name: ${{ env.ASSET }}
+          path: gui/build/bin/${{ env.ASSET }}
 
   gui-macos:
     name: Build GUI (macos/universal)
+    needs: meta
     runs-on: macos-latest
+    env:
+      ASSET: go-dispatch-proxy-gui.macos.universal-${{ needs.meta.outputs.version }}.zip
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -118,11 +148,11 @@ jobs:
         run: wails build -platform darwin/universal -clean
       - name: Zip app bundle
         working-directory: gui/build/bin
-        run: zip -r go-dispatch-proxy-gui.macos.universal.zip *.app
+        run: zip -r "$ASSET" *.app
       - uses: actions/upload-artifact@v4
         with:
-          name: go-dispatch-proxy-gui.macos.universal.zip
-          path: gui/build/bin/go-dispatch-proxy-gui.macos.universal.zip
+          name: ${{ env.ASSET }}
+          path: gui/build/bin/${{ env.ASSET }}
 
   release:
     name: Publish release
