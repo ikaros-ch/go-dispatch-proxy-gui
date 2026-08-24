@@ -1,5 +1,5 @@
-// const.go
-package main
+// constants.go
+package dispatcher
 
 // AUTH_METHOD
 const (
