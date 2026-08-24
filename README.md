@@ -4,6 +4,26 @@ A SOCKS5 load balancing proxy to combine multiple internet connections into one.
 
 It can also be used as a transparent proxy to load balance multiple SSH tunnels.
 
+## GUI
+
+This fork adds a desktop GUI (built with [Wails](https://wails.io), in [`gui/`](gui/)) on top of the original CLI, with two things the CLI doesn't have:
+
+- **Connection testing**: measures real latency and download throughput for each candidate interface or tunnel endpoint, with traffic routed strictly over that interface's own source address (the same binding technique the proxy itself uses).
+- **Suggested load balancing**: proposes a contention ratio for each connection, proportional to its measured throughput, which you can review and adjust before starting the proxy.
+
+It also has interface selection with checkboxes, editable ratios, normal/tunnel mode switching, and a live log/stats view while the proxy is running.
+
+### Running the GUI
+
+Requires Go, Node.js, and the [Wails CLI](https://wails.io/docs/gettingstarted/installation) (`go install github.com/wailsapp/wails/v2/cmd/wails@latest`). Run `wails doctor` to check prerequisites (on Windows, WebView2 is usually already installed).
+
+```sh
+$ cd gui
+$ wails dev      # live-reloading dev mode
+# or
+$ wails build    # produces gui/build/bin/gui.exe (or the platform equivalent)
+```
+
 ## Rationale
 
 The idea for this project came from [dispatch-proxy](https://github.com/Morhaus/dispatch-proxy) which is written in NodeJS.
@@ -115,24 +135,26 @@ Tunnel mode doesn't require root privilege.
 
 Ensure that Go is installed and available on the system path.
 
+The proxy engine lives in the importable [`dispatcher`](dispatcher/) package, used by both the CLI (`cmd/cli`) and the GUI (`gui/`, see above).
+
 ```sh
-$ git clone https://github.com/extremecoders-re/go-dispatch-proxy.git
-$ cd go-dispatch-proxy
+$ git clone https://github.com/ikaros-ch/go-dispatch-proxy-gui.git
+$ cd go-dispatch-proxy-gui
 
 # Compile for Windows x86
-$ GOOS=windows GOARCH=386 go build
+$ GOOS=windows GOARCH=386 go build -o go-dispatch-proxy.exe ./cmd/cli
 
 # Compile for Windows x64
-$ GOOS=windows GOARCH=amd64 go build
+$ GOOS=windows GOARCH=amd64 go build -o go-dispatch-proxy.exe ./cmd/cli
 
 # Compile for Linux x86
-$ GOOS=linux GOARCH=386 go build
+$ GOOS=linux GOARCH=386 go build -o go-dispatch-proxy ./cmd/cli
 
 # Compile for Linux x64
-$ GOOS=linux GOARCH=amd64 go build
+$ GOOS=linux GOARCH=amd64 go build -o go-dispatch-proxy ./cmd/cli
 
 # Compile for Macos x64
-$ GOOS=darwin GOARCH=amd64 go build
+$ GOOS=darwin GOARCH=amd64 go build -o go-dispatch-proxy ./cmd/cli
 ```
 
 ## Credits

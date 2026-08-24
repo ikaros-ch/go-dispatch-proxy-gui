@@ -1,3 +1,3 @@
 module go-dispatch-proxy
 
-go 1.15
+go 1.21
