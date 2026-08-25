@@ -1,6 +1,6 @@
 # Go dispatch proxy Gui
 
-This is intented for private use, its not fully tested.
+This is intented for private use, it's not fully tested.
 
 A SOCKS5 load balancing proxy to combine multiple internet connections into one. Works on Windows and Linux. [Reported to work on macOS](https://github.com/extremecoders-re/go-dispatch-proxy/issues/1). Written in pure Go with no additional dependencies.
 
