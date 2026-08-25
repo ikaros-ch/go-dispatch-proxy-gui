@@ -4,6 +4,7 @@ package dispatcher
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -41,7 +42,14 @@ func (d *Dispatcher) handleHTTPConnection(conn net.Conn) {
 func (d *Dispatcher) handleHTTPConnect(conn net.Conn, req *http.Request) {
 	address := withDefaultPort(req.Host, "443")
 
-	lb, i := d.getLoadBalancer()
+	lb, i, err := d.selectLoadBalancer(address)
+	if err != nil {
+		log.Println("[WARN]", address, "cannot be dispatched:", err)
+		writeHTTPError(conn, http.StatusBadGateway)
+		conn.Close()
+		return
+	}
+
 	remoteConn, err := dialFromLB(lb, i, address)
 	if err != nil {
 		d.recordDialFailure(lb, i, address, err)
@@ -61,48 +69,139 @@ func (d *Dispatcher) handleHTTPConnect(conn net.Conn, req *http.Request) {
 	pipeConnections(conn, remoteConn, lb)
 }
 
-// handleHTTPForward relays a plain HTTP request. The request line is
-// rewritten from absolute-form to origin-form, since that is what an origin
-// server expects to receive.
+// handleHTTPForward relays plain HTTP requests, serving every request that
+// arrives on this client connection rather than only the first.
+//
+// A client keeps one connection to the proxy alive and sends requests for
+// different hosts down it, so the destination is resolved per request. An
+// earlier version piped the connection straight through after the first
+// request, which meant a later request for another host was answered by the
+// first host -- the wrong site's content entirely.
 func (d *Dispatcher) handleHTTPForward(conn net.Conn, reader *bufio.Reader, req *http.Request) {
+	defer conn.Close()
+
+	for {
+		if !d.forwardOneRequest(conn, reader, req) {
+			return
+		}
+
+		// Read the next request from the same client connection.
+		next, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		req = next
+	}
+}
+
+// forwardOneRequest relays a single request/response exchange. It reports
+// whether the client connection may carry another request afterwards.
+func (d *Dispatcher) forwardOneRequest(conn net.Conn, reader *bufio.Reader, req *http.Request) bool {
 	if req.URL == nil || req.URL.Host == "" {
 		// Not a proxy-style request: a browser pointed straight at us, or a
 		// probe. Nothing sensible to forward.
 		writeHTTPError(conn, http.StatusBadRequest)
-		conn.Close()
-		return
+		return false
 	}
 
 	address := withDefaultPort(req.URL.Host, "80")
 
-	lb, i := d.getLoadBalancer()
+	lb, i, err := d.selectLoadBalancer(address)
+	if err != nil {
+		log.Println("[WARN]", address, "cannot be dispatched:", err)
+		writeHTTPError(conn, http.StatusBadGateway)
+		return false
+	}
+
 	remoteConn, err := dialFromLB(lb, i, address)
 	if err != nil {
 		d.recordDialFailure(lb, i, address, err)
 		writeHTTPError(conn, http.StatusBadGateway)
-		conn.Close()
-		return
+		return false
 	}
-
-	// Hop-by-hop headers must not be forwarded to the origin server.
-	req.Header.Del("Proxy-Connection")
-	req.Header.Del("Proxy-Authorization")
-
-	// Write returns the request in origin-form when RequestURI is empty and
-	// URL carries the path, which is exactly what an origin server wants.
-	if err := req.Write(remoteConn); err != nil {
-		remoteConn.Close()
-		conn.Close()
-		return
-	}
+	// Byte counters are maintained by the wrapper rather than by
+	// pipeConnections, which is not used on this path.
+	counted := newCountingConn(remoteConn, lb)
+	defer counted.Close()
 
 	atomic.AddUint64(&lb.ConnectionsHandled, 1)
 	log.Println("[DEBUG]", address, "->", lb.Address, "LB:", i)
 
-	// Anything the client already buffered past the request head still needs
-	// to reach the server, so hand over the buffered reader rather than the
-	// bare connection.
-	pipeConnections(newBufferedConn(conn, reader), remoteConn, lb)
+	// Whether the *client* connection may be reused has to be decided from
+	// the request as it arrived, before req.Close is repurposed below for
+	// the upstream connection.
+	clientMayReuse := !req.Close &&
+		!requestedClose(req) &&
+		req.ProtoMajor == 1 && req.ProtoMinor >= 1
+
+	// Hop-by-hop headers must not reach the origin server.
+	req.Header.Del("Proxy-Connection")
+	req.Header.Del("Proxy-Authorization")
+
+	// One upstream connection per request: the client's connection is kept
+	// alive independently, and this avoids having to track a pool of
+	// upstream connections keyed by host and link.
+	req.Close = true
+
+	// Write emits origin-form when RequestURI is empty and URL carries the
+	// path, which is what an origin server expects.
+	if err := req.Write(counted); err != nil {
+		return false
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(counted), req)
+	if err != nil {
+		writeHTTPError(conn, http.StatusBadGateway)
+		return false
+	}
+	defer resp.Body.Close()
+
+	// A protocol upgrade (WebSocket and friends) turns the rest of the
+	// exchange into an opaque tunnel.
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		if err := resp.Write(conn); err != nil {
+			return false
+		}
+		tunnel(newBufferedConn(conn, reader), counted)
+		return false
+	}
+
+	// The upstream connection closes after this response, so tell the
+	// client only what applies to its own connection.
+	resp.Close = false
+	resp.Header.Del("Connection")
+
+	if err := resp.Write(conn); err != nil {
+		return false
+	}
+
+	return clientMayReuse
+}
+
+// requestedClose reports whether the client asked for the connection to end
+// after this exchange.
+func requestedClose(req *http.Request) bool {
+	for _, value := range req.Header.Values("Connection") {
+		if strings.EqualFold(strings.TrimSpace(value), "close") {
+			return true
+		}
+	}
+	return false
+}
+
+// tunnel joins two connections and waits for either direction to finish,
+// used once a connection stops being request/response shaped.
+func tunnel(client, remote net.Conn) {
+	done := make(chan struct{}, 2)
+	go func() {
+		io.Copy(remote, client)
+		done <- struct{}{}
+	}()
+	go func() {
+		io.Copy(client, remote)
+		done <- struct{}{}
+	}()
+	<-done
 }
 
 // withDefaultPort appends a port when the address carries none.
@@ -139,3 +238,26 @@ func newBufferedConn(conn net.Conn, reader *bufio.Reader) net.Conn {
 }
 
 func (c *bufferedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
+
+// countingConn tallies bytes against a load balancer for paths that do not
+// use pipeConnections, so live stats stay accurate for plain HTTP too.
+type countingConn struct {
+	net.Conn
+	lb *LoadBalancer
+}
+
+func newCountingConn(conn net.Conn, lb *LoadBalancer) net.Conn {
+	return &countingConn{Conn: conn, lb: lb}
+}
+
+func (c *countingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	atomic.AddUint64(&c.lb.BytesReceived, uint64(n))
+	return n, err
+}
+
+func (c *countingConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	atomic.AddUint64(&c.lb.BytesSent, uint64(n))
+	return n, err
+}

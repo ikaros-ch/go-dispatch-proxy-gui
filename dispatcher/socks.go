@@ -5,8 +5,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"strconv"
 )
 
 func clientGreeting(conn net.Conn) (byte, []byte, error) {
@@ -107,6 +109,25 @@ func clientConnectionRequest(conn net.Conn) (string, error) {
 			return "", errors.New("[WARN] client connection request failed")
 		}
 		address = fmt.Sprintf("%s:%d", string(domainName), binary.BigEndian.Uint16(port))
+
+	case IPV6:
+		ipv6Address := make([]byte, 16)
+
+		if nRead, err := io.ReadFull(conn, ipv6Address); err != nil || nRead != len(ipv6Address) {
+			conn.Write([]byte{5, SERVER_FAILURE, 0, 1, 0, 0, 0, 0, 0, 0})
+			conn.Close()
+			return "", errors.New("[WARN] client connection request failed")
+		}
+
+		if nRead, err := io.ReadFull(conn, port); err != nil || nRead != len(port) {
+			conn.Write([]byte{5, SERVER_FAILURE, 0, 1, 0, 0, 0, 0, 0, 0})
+			conn.Close()
+			return "", errors.New("[WARN] client connection request failed")
+		}
+
+		// JoinHostPort brackets the literal, giving "[2001:db8::1]:443".
+		address = net.JoinHostPort(net.IP(ipv6Address).String(),
+			strconv.Itoa(int(binary.BigEndian.Uint16(port))))
 
 	default:
 		conn.Write([]byte{5, ADDRTYPE_NOT_SUPPORTED, 0, 1, 0, 0, 0, 0, 0, 0})

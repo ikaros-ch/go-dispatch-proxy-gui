@@ -22,6 +22,7 @@ interface Row {
     id: string;
     address: string;      // interface IP (normal mode) or host:port (tunnel mode)
     label: string;        // interface name, or blank in tunnel mode
+    isIPv6: boolean;      // the two families are dispatched over separately
     enabled: boolean;
     ratio: number;
     latencyMs?: number;
@@ -89,6 +90,7 @@ async function loadInterfaces() {
             id: prev?.id ?? newRowId(),
             address: iface.IP,
             label: iface.Name,
+            isIPv6: iface.IsIPv6,
             enabled: prev?.enabled ?? true,
             ratio: prev?.ratio ?? 1,
             latencyMs: prev?.latencyMs,
@@ -101,7 +103,7 @@ async function loadInterfaces() {
 }
 
 function addTunnelRow() {
-    rows.push({id: newRowId(), address: '', label: '', enabled: true, ratio: 1});
+    rows.push({id: newRowId(), address: '', label: '', isIPv6: false, enabled: true, ratio: 1});
     render();
 }
 
@@ -473,7 +475,7 @@ function rowHtml(row: Row): string {
         return `
             <tr>
                 <td><input type="checkbox" data-row="${row.id}" data-field="enabled" ${row.enabled ? 'checked' : ''} ${running ? 'disabled' : ''}/></td>
-                <td>${escapeHtml(row.label)}</td>
+                <td>${escapeHtml(row.label)} <span class="hint">${row.isIPv6 ? 'IPv6' : 'IPv4'}</span></td>
                 <td class="mono">${escapeHtml(row.address)}</td>
                 <td class="mono">${latency}</td>
                 <td class="mono">${download}</td>

@@ -49,12 +49,20 @@ type TestResult struct {
 // bound to the given local IP, mirroring the source-IP binding used when
 // actually dispatching traffic in server_response.go.
 func clientBoundToIP(ip string) *http.Client {
+	parsed := net.ParseIP(ip)
 	dialer := &net.Dialer{
-		LocalAddr: &net.TCPAddr{IP: net.ParseIP(ip)},
+		LocalAddr: &net.TCPAddr{IP: parsed},
 		Timeout:   5 * time.Second,
 	}
+
+	// Pin the dial to the source address's family: binding an IPv6 source
+	// while resolving the test host to IPv4 (or the reverse) cannot connect.
+	network := networkFor(parsed != nil && parsed.To4() == nil)
+
 	transport := &http.Transport{
-		DialContext: dialer.DialContext,
+		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, addr)
+		},
 	}
 	return &http.Client{Transport: transport, Timeout: 20 * time.Second}
 }

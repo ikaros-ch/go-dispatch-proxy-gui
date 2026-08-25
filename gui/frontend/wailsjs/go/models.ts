@@ -3,6 +3,7 @@ export namespace dispatcher {
 	export class InterfaceInfo {
 	    Name: string;
 	    IP: string;
+	    IsIPv6: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new InterfaceInfo(source);
@@ -12,6 +13,7 @@ export namespace dispatcher {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.Name = source["Name"];
 	        this.IP = source["IP"];
+	        this.IsIPv6 = source["IsIPv6"];
 	    }
 	}
 	export class LoadBalancer {
@@ -19,6 +21,7 @@ export namespace dispatcher {
 	    Iface: string;
 	    ContentionRatio: number;
 	    CurrentConnections: number;
+	    IsIPv6: boolean;
 	    BytesSent: number;
 	    BytesReceived: number;
 	    ConnectionsHandled: number;
@@ -34,6 +37,7 @@ export namespace dispatcher {
 	        this.Iface = source["Iface"];
 	        this.ContentionRatio = source["ContentionRatio"];
 	        this.CurrentConnections = source["CurrentConnections"];
+	        this.IsIPv6 = source["IsIPv6"];
 	        this.BytesSent = source["BytesSent"];
 	        this.BytesReceived = source["BytesReceived"];
 	        this.ConnectionsHandled = source["ConnectionsHandled"];

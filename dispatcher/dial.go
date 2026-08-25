@@ -11,13 +11,17 @@ import "net"
 //
 // The index is only used for log context by the Linux implementation.
 func dialFromLB(lb *LoadBalancer, _ int, remoteAddress string) (net.Conn, error) {
-	localTCPAddr, err := net.ResolveTCPAddr("tcp4", lb.Address)
+	// The network is pinned to the link's family: a source bound to one
+	// family cannot reach destinations of the other.
+	network := networkFor(lb.IsIPv6)
+
+	localTCPAddr, err := net.ResolveTCPAddr(network, lb.Address)
 	if err != nil {
 		return nil, err
 	}
-	remoteTCPAddr, err := net.ResolveTCPAddr("tcp4", remoteAddress)
+	remoteTCPAddr, err := net.ResolveTCPAddr(network, remoteAddress)
 	if err != nil {
 		return nil, err
 	}
-	return net.DialTCP("tcp4", localTCPAddr, remoteTCPAddr)
+	return net.DialTCP(network, localTCPAddr, remoteTCPAddr)
 }

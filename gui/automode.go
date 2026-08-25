@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -213,11 +214,14 @@ func (m *autoManager) reconfigure(ctx context.Context, disp *dispatcher.Dispatch
 
 // addressesToIPs strips the ":port" suffix that load balancer addresses
 // carry so they can be compared with interface IPs.
+//
+// SplitHostPort is used rather than trimming at the last colon, which would
+// mangle the bracketed IPv6 form "[2001:db8::1]:0".
 func addressesToIPs(addresses []string) []string {
 	out := make([]string, 0, len(addresses))
 	for _, addr := range addresses {
-		if i := strings.LastIndex(addr, ":"); i >= 0 {
-			out = append(out, addr[:i])
+		if host, _, err := net.SplitHostPort(addr); err == nil {
+			out = append(out, host)
 			continue
 		}
 		out = append(out, addr)

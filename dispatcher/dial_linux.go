@@ -13,7 +13,11 @@ import (
 // balancer's interface. Linux additionally uses SO_BINDTODEVICE, which is
 // what makes dispatching work when several interfaces share a route.
 func dialFromLB(lb *LoadBalancer, i int, remoteAddress string) (net.Conn, error) {
-	localTCPAddr, err := net.ResolveTCPAddr("tcp4", lb.Address)
+	// The network is pinned to the link's family: a source bound to one
+	// family cannot reach destinations of the other.
+	network := networkFor(lb.IsIPv6)
+
+	localTCPAddr, err := net.ResolveTCPAddr(network, lb.Address)
 	if err != nil {
 		return nil, err
 	}
@@ -31,5 +35,5 @@ func dialFromLB(lb *LoadBalancer, i int, remoteAddress string) (net.Conn, error)
 		},
 	}
 
-	return dialer.Dial("tcp4", remoteAddress)
+	return dialer.Dial(network, remoteAddress)
 }

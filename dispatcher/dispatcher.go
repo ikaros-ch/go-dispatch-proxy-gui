@@ -2,6 +2,7 @@
 package dispatcher
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +22,10 @@ type LoadBalancer struct {
 	Iface              string
 	ContentionRatio    int
 	CurrentConnections int
+	// IsIPv6 records the address family of this link. A source address of
+	// one family cannot reach destinations of the other, so this decides
+	// which connections may be dispatched here.
+	IsIPv6 bool
 
 	BytesSent          uint64
 	BytesReceived      uint64
@@ -70,13 +75,15 @@ func ParseLoadBalancers(args []string, tunnel bool) ([]LoadBalancer, error) {
 		var err error
 
 		if tunnel {
-			ipOrFqdnPort := strings.Split(splitted[0], ":")
-			if len(ipOrFqdnPort) != 2 {
+			// SplitHostPort rather than a plain split on ":", so bracketed
+			// IPv6 endpoints such as [2001:db8::1]:1080 parse correctly.
+			host, portStr, splitErr := net.SplitHostPort(splitted[0])
+			if splitErr != nil {
 				return nil, fmt.Errorf("invalid address specification %s", splitted[0])
 			}
 
-			lbIPOrFQDN = ipOrFqdnPort[0]
-			lbPort, err = strconv.Atoi(ipOrFqdnPort[1])
+			lbIPOrFQDN = host
+			lbPort, err = strconv.Atoi(portStr)
 			if err != nil || lbPort <= 0 || lbPort > 65535 {
 				return nil, fmt.Errorf("invalid port %s", splitted[0])
 			}
@@ -85,8 +92,9 @@ func ParseLoadBalancers(args []string, tunnel bool) ([]LoadBalancer, error) {
 			lbPort = 0
 		}
 
-		// FQDN not supported for non-tunnel mode
-		if !tunnel && net.ParseIP(lbIPOrFQDN).To4() == nil {
+		// FQDN not supported for non-tunnel mode: the address has to name a
+		// local interface. Either family is accepted.
+		if !tunnel && net.ParseIP(lbIPOrFQDN) == nil {
 			return nil, fmt.Errorf("invalid address %s", lbIPOrFQDN)
 		}
 
@@ -106,10 +114,15 @@ func ParseLoadBalancers(args []string, tunnel bool) ([]LoadBalancer, error) {
 			}
 		}
 
+		// JoinHostPort brackets IPv6 literals, which a plain "%s:%d" would
+		// produce unparseable output for.
+		address := net.JoinHostPort(lbIPOrFQDN, strconv.Itoa(lbPort))
+
 		lbList[idx] = LoadBalancer{
-			Address:         fmt.Sprintf("%s:%d", lbIPOrFQDN, lbPort),
+			Address:         address,
 			Iface:           iface,
 			ContentionRatio: contRatio,
+			IsIPv6:          isIPv6Address(address),
 		}
 	}
 
@@ -167,6 +180,60 @@ func (d *Dispatcher) getLoadBalancer(params ...interface{}) (*LoadBalancer, int)
 	}
 
 	return lb, ilb
+}
+
+// advanceLocked moves the round-robin cursor on. Callers must hold d.mu.
+func (d *Dispatcher) advanceLocked() {
+	d.lbIndex++
+	if d.lbIndex >= len(d.lbList) {
+		d.lbIndex = 0
+	}
+}
+
+// getLoadBalancerFor picks the next load balancer whose address family the
+// destination actually offers, honouring contention ratios and skipping
+// links that cannot reach it.
+//
+// It returns errNoCompatibleLoadBalancer when, for example, the destination
+// is IPv6-only and every configured link is IPv4.
+func (d *Dispatcher) getLoadBalancerFor(hasV4, hasV6 bool) (*LoadBalancer, int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for scanned := 0; scanned < len(d.lbList); scanned++ {
+		index := d.lbIndex
+		lb := &d.lbList[index]
+
+		if !lb.usableFor(hasV4, hasV6) {
+			d.advanceLocked()
+			continue
+		}
+
+		lb.CurrentConnections++
+		if lb.CurrentConnections >= lb.ContentionRatio {
+			lb.CurrentConnections = 0
+			d.advanceLocked()
+		}
+		return lb, index, nil
+	}
+
+	return nil, 0, errNoCompatibleLoadBalancer
+}
+
+// selectLoadBalancer resolves the destination far enough to know which
+// families it supports, then picks a link that can reach it.
+func (d *Dispatcher) selectLoadBalancer(destination string) (*LoadBalancer, int, error) {
+	host, _, err := splitHostPort(destination)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	hasV4, hasV6, err := destinationFamilies(context.Background(), host)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return d.getLoadBalancerFor(hasV4, hasV6)
 }
 
 // pipeConnections joins the local and remote connections together,
@@ -246,7 +313,7 @@ func (d *Dispatcher) handleConnection(conn net.Conn) {
 // them across the configured load balancers. It returns once the listener
 // is up; connections are accepted in a background goroutine.
 func (d *Dispatcher) Start(lhost string, lport int) error {
-	if net.ParseIP(lhost).To4() == nil {
+	if net.ParseIP(lhost) == nil {
 		return fmt.Errorf("invalid host %s", lhost)
 	}
 	if lport < 1 || lport > 65535 {
@@ -256,8 +323,10 @@ func (d *Dispatcher) Start(lhost string, lport int) error {
 		return errors.New("no load balancers configured")
 	}
 
-	localBindAddress := fmt.Sprintf("%s:%d", lhost, lport)
-	l, err := net.Listen("tcp4", localBindAddress)
+	// JoinHostPort brackets an IPv6 bind address, and "tcp" accepts clients
+	// of either family so the proxy can be reached on ::1 as well.
+	localBindAddress := net.JoinHostPort(lhost, strconv.Itoa(lport))
+	l, err := net.Listen("tcp", localBindAddress)
 	if err != nil {
 		return fmt.Errorf("could not start local server on %s: %w", localBindAddress, err)
 	}
@@ -290,7 +359,7 @@ func (d *Dispatcher) Start(lhost string, lport int) error {
 // It may be called before or after Start; both listeners share the same load
 // balancers and contention ratios.
 func (d *Dispatcher) StartHTTP(lhost string, lport int) error {
-	if net.ParseIP(lhost).To4() == nil {
+	if net.ParseIP(lhost) == nil {
 		return fmt.Errorf("invalid host %s", lhost)
 	}
 	if lport < 1 || lport > 65535 {
@@ -307,8 +376,10 @@ func (d *Dispatcher) StartHTTP(lhost string, lport int) error {
 		return errors.New("HTTP proxy is already listening")
 	}
 
-	localBindAddress := fmt.Sprintf("%s:%d", lhost, lport)
-	l, err := net.Listen("tcp4", localBindAddress)
+	// JoinHostPort brackets an IPv6 bind address, and "tcp" accepts clients
+	// of either family so the proxy can be reached on ::1 as well.
+	localBindAddress := net.JoinHostPort(lhost, strconv.Itoa(lport))
+	l, err := net.Listen("tcp", localBindAddress)
 	if err != nil {
 		return fmt.Errorf("could not start HTTP proxy on %s: %w", localBindAddress, err)
 	}

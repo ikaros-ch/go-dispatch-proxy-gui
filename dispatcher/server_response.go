@@ -11,7 +11,13 @@ import (
 // the destination from that interface, and reports the outcome back to the
 // client in SOCKS5 reply format.
 func (d *Dispatcher) serverResponse(localConn net.Conn, remoteAddress string) {
-	lb, i := d.getLoadBalancer()
+	lb, i, err := d.selectLoadBalancer(remoteAddress)
+	if err != nil {
+		log.Println("[WARN]", remoteAddress, "cannot be dispatched:", err)
+		localConn.Write([]byte{5, NETWORK_UNREACHABLE, 0, 1, 0, 0, 0, 0, 0, 0})
+		localConn.Close()
+		return
+	}
 
 	remoteConn, err := dialFromLB(lb, i, remoteAddress)
 	if err != nil {

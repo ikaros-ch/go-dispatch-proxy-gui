@@ -84,10 +84,21 @@ func socks5Handshake(conn net.Conn, host string, port int) error {
 		return fmt.Errorf("proxy requires authentication method %d", reply[1])
 	}
 
-	// CONNECT request, addressing the destination by name so the proxy
-	// resolves it on the outbound interface it selects.
-	req := []byte{socksVersion5, CONNECT, 0x00, DOMAIN, byte(len(host))}
-	req = append(req, host...)
+	// CONNECT request. A name is sent as-is so the proxy resolves it on the
+	// interface it selects; literals are sent in their own address form,
+	// since the domain form cannot represent an IPv6 address unambiguously.
+	req := []byte{socksVersion5, CONNECT, 0x00}
+	switch ip := net.ParseIP(host); {
+	case ip == nil:
+		req = append(req, DOMAIN, byte(len(host)))
+		req = append(req, host...)
+	case ip.To4() != nil:
+		req = append(req, IPV4)
+		req = append(req, ip.To4()...)
+	default:
+		req = append(req, IPV6)
+		req = append(req, ip.To16()...)
+	}
 	req = binary.BigEndian.AppendUint16(req, uint16(port))
 	if _, err := conn.Write(req); err != nil {
 		return fmt.Errorf("proxy CONNECT failed: %w", err)

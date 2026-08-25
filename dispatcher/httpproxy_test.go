@@ -159,3 +159,51 @@ func TestWithDefaultPort(t *testing.T) {
 		}
 	}
 }
+
+// TestHTTPProxyKeepAliveRoutesEachRequest is a regression test for a
+// connection-reuse bug: browsers send requests for different hosts down one
+// proxy connection, and an implementation that pipes after the first request
+// answers later ones with the first host's content.
+func TestHTTPProxyKeepAliveRoutesEachRequest(t *testing.T) {
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("first origin"))
+	}))
+	defer first.Close()
+
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("second origin"))
+	}))
+	defer second.Close()
+
+	_, proxyAddr := startLoopbackProxy(t)
+
+	proxyURL, _ := url.Parse("http://" + proxyAddr)
+	// A single reusable connection, which is what makes the bug visible.
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:             http.ProxyURL(proxyURL),
+			DisableKeepAlives: false,
+			MaxConnsPerHost:   1,
+		},
+		Timeout: 20 * time.Second,
+	}
+
+	for i := 0; i < 3; i++ {
+		for _, c := range []struct{ url, want string }{
+			{first.URL, "first origin"},
+			{second.URL, "second origin"},
+		} {
+			resp, err := client.Get(c.url)
+			if err != nil {
+				t.Fatalf("request to %s failed: %v", c.url, err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			if string(body) != c.want {
+				t.Fatalf("got %q from %s, want %q -- a reused connection was routed to the wrong host",
+					body, c.url, c.want)
+			}
+		}
+	}
+}
