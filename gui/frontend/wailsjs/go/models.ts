@@ -74,6 +74,7 @@ export namespace main {
 	    startAtLoginSupported: boolean;
 	    startProxyOnLaunch: boolean;
 	    autoMode: boolean;
+	    systemProxySupported: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppSettings(source);
@@ -85,6 +86,7 @@ export namespace main {
 	        this.startAtLoginSupported = source["startAtLoginSupported"];
 	        this.startProxyOnLaunch = source["startProxyOnLaunch"];
 	        this.autoMode = source["autoMode"];
+	        this.systemProxySupported = source["systemProxySupported"];
 	    }
 	}
 	export class LBConfig {
@@ -107,6 +109,8 @@ export namespace main {
 	    tunnel: boolean;
 	    quiet: boolean;
 	    autoMode: boolean;
+	    httpPort: number;
+	    systemProxy: boolean;
 	    balancers: LBConfig[];
 	
 	    static createFrom(source: any = {}) {
@@ -120,6 +124,8 @@ export namespace main {
 	        this.tunnel = source["tunnel"];
 	        this.quiet = source["quiet"];
 	        this.autoMode = source["autoMode"];
+	        this.httpPort = source["httpPort"];
+	        this.systemProxy = source["systemProxy"];
 	        this.balancers = this.convertValues(source["balancers"], LBConfig);
 	    }
 	
@@ -146,6 +152,8 @@ export namespace main {
 	    listenAddr: string;
 	    loadBalancers: dispatcher.LoadBalancer[];
 	    autoMode: boolean;
+	    httpAddr: string;
+	    systemProxy: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Status(source);
@@ -157,6 +165,8 @@ export namespace main {
 	        this.listenAddr = source["listenAddr"];
 	        this.loadBalancers = this.convertValues(source["loadBalancers"], dispatcher.LoadBalancer);
 	        this.autoMode = source["autoMode"];
+	        this.httpAddr = source["httpAddr"];
+	        this.systemProxy = source["systemProxy"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

@@ -20,6 +20,14 @@ type Settings struct {
 	AutoMode bool `json:"autoMode"`
 	// LastConfig is the configuration to restore.
 	LastConfig ProxyConfig `json:"lastConfig"`
+
+	// SystemProxyActive records that we changed the OS proxy settings and
+	// have not put them back yet. If the app is killed before it can
+	// restore them, the next launch uses this to repair the settings --
+	// otherwise the machine would be left pointing at a dead proxy.
+	SystemProxyActive bool `json:"systemProxyActive"`
+	// SavedSystemProxy is the configuration to restore.
+	SavedSystemProxy systemProxyState `json:"savedSystemProxy"`
 }
 
 // settingsPath returns the settings file location, creating no directories.

@@ -34,6 +34,9 @@ let mode: Mode = 'normal';
 let rows: Row[] = [];
 let lhost = '127.0.0.1';
 let lport = 8080;
+let httpPort = 8081;
+let httpEnabled = true;
+let systemProxy = false;
 let quiet = false;
 let running = false;
 let listenAddr = '';
@@ -50,6 +53,9 @@ let startProxyOnLaunch = false;
 let testingProxy = false;
 let proxyResult: dispatcher.TestResult | null = null;
 let proxyTestError = '';
+let systemProxySupported = false;
+let httpAddr = '';
+let systemProxyActive = false;
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
@@ -167,6 +173,7 @@ async function loadSettings() {
     startAtLoginSupported = settings.startAtLoginSupported;
     startProxyOnLaunch = settings.startProxyOnLaunch;
     autoMode = settings.autoMode;
+    systemProxySupported = settings.systemProxySupported;
     render();
 }
 
@@ -238,6 +245,8 @@ async function start() {
             tunnel: mode === 'tunnel',
             quiet,
             autoMode: autoMode && mode === 'normal',
+            httpPort: httpEnabled ? httpPort : 0,
+            systemProxy: httpEnabled && systemProxy,
             balancers,
         } as main.ProxyConfig;
         await StartProxy(config);
@@ -267,6 +276,8 @@ async function refreshStatus() {
     listenAddr = status.listenAddr;
     liveStats = status.loadBalancers ?? [];
     autoMode = status.autoMode;
+    httpAddr = status.httpAddr;
+    systemProxyActive = status.systemProxy;
     render();
 }
 
@@ -337,10 +348,28 @@ function render() {
             <div class="row">
                 <label>Listen host</label>
                 <input type="text" id="lhost" value="${lhost}" ${running ? 'disabled' : ''}/>
-                <label>Listen port</label>
+                <label>SOCKS5 port</label>
                 <input type="number" id="lport" value="${lport}" ${running ? 'disabled' : ''}/>
                 <label><input type="checkbox" id="quiet" ${quiet ? 'checked' : ''} ${running ? 'disabled' : ''}/> Quiet (disable logs)</label>
             </div>
+            <div class="row">
+                <label><input type="checkbox" id="http-enabled" ${httpEnabled ? 'checked' : ''} ${running ? 'disabled' : ''}/> HTTP proxy</label>
+                <label>HTTP port</label>
+                <input type="number" id="http-port" value="${httpPort}" ${running || !httpEnabled ? 'disabled' : ''}/>
+            </div>
+            <p class="hint">Windows proxy settings speak HTTP, not SOCKS5 — keep this on to use the proxy system wide.</p>
+            <div class="row">
+                <label title="${systemProxySupported ? '' : 'Only available on Windows.'}">
+                    <input type="checkbox" id="system-proxy" ${systemProxy ? 'checked' : ''} ${running || !httpEnabled || !systemProxySupported ? 'disabled' : ''}/>
+                    Use as system proxy
+                </label>
+                ${systemProxySupported
+        ? '<span class="hint">Points Windows at this proxy on start, and restores your previous settings on stop.</span>'
+        : '<span class="hint">Not available on this platform — enter the HTTP address in your system network settings manually.</span>'}
+            </div>
+            ${running && httpAddr ? `
+                <p class="hint">HTTP proxy address: <span class="mono">${escapeHtml(httpAddr)}</span>${systemProxyActive ? ' — applied to system settings.' : ' — enter this in Settings › Network &amp; Internet › Proxy.'}</p>
+            ` : ''}
         </div>
 
         <div class="panel">
@@ -507,6 +536,18 @@ function wireEvents() {
     lportEl?.addEventListener('change', () => lport = Number(lportEl.value) || 8080);
     const quietEl = document.querySelector<HTMLInputElement>('#quiet');
     quietEl?.addEventListener('change', () => quiet = quietEl.checked);
+
+    const httpEnabledEl = document.querySelector<HTMLInputElement>('#http-enabled');
+    httpEnabledEl?.addEventListener('change', () => {
+        httpEnabled = httpEnabledEl.checked;
+        // The system proxy needs the HTTP listener to point at.
+        if (!httpEnabled) systemProxy = false;
+        render();
+    });
+    const httpPortEl = document.querySelector<HTMLInputElement>('#http-port');
+    httpPortEl?.addEventListener('change', () => httpPort = Number(httpPortEl.value) || 8081);
+    const systemProxyEl = document.querySelector<HTMLInputElement>('#system-proxy');
+    systemProxyEl?.addEventListener('change', () => systemProxy = systemProxyEl.checked);
 
     const autoEl = document.querySelector<HTMLInputElement>('#auto-mode');
     autoEl?.addEventListener('change', () => toggleAutoMode(autoEl.checked));

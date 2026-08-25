@@ -33,12 +33,16 @@ type LoadBalancer struct {
 // so that a GUI (or tests) can create, run, and stop multiple independent
 // instances in the same process.
 type Dispatcher struct {
-	mu       sync.Mutex
-	lbList   []LoadBalancer
-	lbIndex  int
-	tunnel   bool
-	listener net.Listener
-	running  bool
+	mu      sync.Mutex
+	lbList  []LoadBalancer
+	lbIndex int
+	tunnel  bool
+	// listener serves SOCKS5 (or tunnel) clients; httpListener serves the
+	// HTTP proxy protocol that OS-level proxy settings speak. Either may be
+	// absent, and both dispatch over the same load balancers.
+	listener     net.Listener
+	httpListener net.Listener
+	running      bool
 }
 
 // New creates a Dispatcher for the given load balancers. tunnel selects
@@ -200,7 +204,7 @@ retry:
 	remoteConn, err := net.DialTCP("tcp4", nil, remoteAddr)
 
 	if err != nil {
-		lb.LastError = err.Error()
+		d.setLastError(lb, err.Error())
 		log.Println("[WARN]", lb.Address, fmt.Sprintf("{%s}", err), "LB:", i)
 
 		if !complete && bitset == nil {
@@ -278,7 +282,69 @@ func (d *Dispatcher) Start(lhost string, lport int) error {
 	return nil
 }
 
-// Stop closes the listener, ending the accept loop started by Start.
+// StartHTTP begins listening for HTTP proxy clients on lhost:lport, in
+// addition to whatever Start established. This is the protocol operating
+// system proxy settings use, so it is what makes the dispatcher usable
+// system wide.
+//
+// It may be called before or after Start; both listeners share the same load
+// balancers and contention ratios.
+func (d *Dispatcher) StartHTTP(lhost string, lport int) error {
+	if net.ParseIP(lhost).To4() == nil {
+		return fmt.Errorf("invalid host %s", lhost)
+	}
+	if lport < 1 || lport > 65535 {
+		return fmt.Errorf("invalid port %d", lport)
+	}
+	if len(d.lbList) == 0 {
+		return errors.New("no load balancers configured")
+	}
+
+	d.mu.Lock()
+	alreadyListening := d.httpListener != nil
+	d.mu.Unlock()
+	if alreadyListening {
+		return errors.New("HTTP proxy is already listening")
+	}
+
+	localBindAddress := fmt.Sprintf("%s:%d", lhost, lport)
+	l, err := net.Listen("tcp4", localBindAddress)
+	if err != nil {
+		return fmt.Errorf("could not start HTTP proxy on %s: %w", localBindAddress, err)
+	}
+
+	d.mu.Lock()
+	d.httpListener = l
+	d.running = true
+	d.mu.Unlock()
+
+	log.Println("[INFO] HTTP proxy started on", localBindAddress)
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go d.handleHTTPConnection(conn)
+		}
+	}()
+
+	return nil
+}
+
+// HTTPAddr reports the address the HTTP proxy is listening on, or "" if it
+// is not running.
+func (d *Dispatcher) HTTPAddr() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.httpListener == nil {
+		return ""
+	}
+	return d.httpListener.Addr().String()
+}
+
+// Stop closes both listeners, ending the accept loops.
 func (d *Dispatcher) Stop() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -287,9 +353,25 @@ func (d *Dispatcher) Stop() error {
 		return nil
 	}
 	d.running = false
-	l := d.listener
+
+	socksListener := d.listener
 	d.listener = nil
-	return l.Close()
+	httpListener := d.httpListener
+	d.httpListener = nil
+
+	// Close both even if the first fails, so neither is left accepting.
+	var firstErr error
+	if socksListener != nil {
+		if err := socksListener.Close(); err != nil {
+			firstErr = err
+		}
+	}
+	if httpListener != nil {
+		if err := httpListener.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // IsRunning reports whether the dispatcher is currently listening.
@@ -348,10 +430,35 @@ func (d *Dispatcher) Addresses() []string {
 }
 
 // Stats returns a snapshot of every load balancer's current stats.
+//
+// The byte and connection counters are incremented atomically by in-flight
+// connections, so they are read the same way rather than copied wholesale.
 func (d *Dispatcher) Stats() []LoadBalancer {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
 	out := make([]LoadBalancer, len(d.lbList))
-	copy(out, d.lbList)
+	for i := range d.lbList {
+		lb := &d.lbList[i]
+		out[i] = LoadBalancer{
+			Address:            lb.Address,
+			Iface:              lb.Iface,
+			ContentionRatio:    lb.ContentionRatio,
+			CurrentConnections: lb.CurrentConnections,
+			BytesSent:          atomic.LoadUint64(&lb.BytesSent),
+			BytesReceived:      atomic.LoadUint64(&lb.BytesReceived),
+			ConnectionsHandled: atomic.LoadUint64(&lb.ConnectionsHandled),
+			LastError:          lb.LastError,
+		}
+	}
 	return out
+}
+
+// setLastError records a dispatch failure against lb. Connection handlers
+// run concurrently with Stats, so this is guarded rather than assigned
+// directly.
+func (d *Dispatcher) setLastError(lb *LoadBalancer, message string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	lb.LastError = message
 }

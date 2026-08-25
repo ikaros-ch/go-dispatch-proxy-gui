@@ -25,6 +25,11 @@ type App struct {
 
 	lhost string
 	lport int
+	// httpPort is the HTTP proxy port, or 0 when only SOCKS5 is served.
+	httpPort int
+	// systemProxyApplied records that the OS settings currently point at us
+	// and must be restored when the proxy stops.
+	systemProxyApplied bool
 
 	// autoMu guards auto, which is owned by the auto mode monitor rather
 	// than by the proxy lifecycle above.
@@ -45,9 +50,18 @@ func (a *App) startup(ctx context.Context) {
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 	log.SetOutput(logWriter(ctx))
 
+	// A previous run that was killed before it could restore the system
+	// proxy would leave this machine pointing at a port nothing is serving,
+	// which looks like a total loss of internet. Repair that first.
+	settings := loadSettings()
+	if settings.SystemProxyActive {
+		log.Println("[WARN] A previous session left the system proxy enabled; restoring the earlier settings")
+		a.disableSystemProxy()
+		settings = loadSettings()
+	}
+
 	// Restore the previous session when asked to, either by the saved
 	// preference or by the -autostart flag the login entry passes.
-	settings := loadSettings()
 	if settings.StartProxyOnLaunch || launchedForAutostart() {
 		go a.resumeSavedProxy(settings)
 	}
@@ -159,12 +173,19 @@ type LBConfig struct {
 
 // ProxyConfig is the full configuration submitted from the GUI's Start action.
 type ProxyConfig struct {
-	LHost     string     `json:"lhost"`
-	LPort     int        `json:"lport"`
-	Tunnel    bool       `json:"tunnel"`
-	Quiet     bool       `json:"quiet"`
-	AutoMode  bool       `json:"autoMode"`
-	Balancers []LBConfig `json:"balancers"`
+	LHost    string `json:"lhost"`
+	LPort    int    `json:"lport"`
+	Tunnel   bool   `json:"tunnel"`
+	Quiet    bool   `json:"quiet"`
+	AutoMode bool   `json:"autoMode"`
+	// HTTPPort, when non-zero, additionally serves the HTTP proxy protocol
+	// that operating system proxy settings speak.
+	HTTPPort int `json:"httpPort"`
+	// SystemProxy points the OS at the HTTP proxy above, so every
+	// application that honours system settings uses it without being
+	// configured individually.
+	SystemProxy bool       `json:"systemProxy"`
+	Balancers   []LBConfig `json:"balancers"`
 }
 
 // StartProxy validates the configuration, builds a dispatcher and starts it
@@ -182,7 +203,77 @@ func (a *App) StartProxy(config ProxyConfig) error {
 	}
 
 	a.persistConfig(config)
+
+	// Redirecting the whole system is the last step, so it only happens
+	// once there is a listener actually able to serve it.
+	if config.SystemProxy && config.HTTPPort > 0 {
+		if err := a.enableSystemProxy(config); err != nil {
+			// The proxy itself is running fine; report the failure without
+			// tearing it down.
+			log.Println("[WARN] Could not apply system proxy settings:", err)
+		}
+	}
+
 	return nil
+}
+
+// enableSystemProxy captures the current OS proxy settings, records them for
+// crash recovery, and points the system at our HTTP listener.
+func (a *App) enableSystemProxy(config ProxyConfig) error {
+	if !systemProxySupported() {
+		return fmt.Errorf("setting the system proxy is not supported on this platform")
+	}
+
+	previous, err := readSystemProxy()
+	if err != nil {
+		return err
+	}
+
+	// Persist before applying: if the machine loses power immediately
+	// afterwards, the next launch still knows what to put back.
+	settings := loadSettings()
+	settings.SavedSystemProxy = previous
+	settings.SystemProxyActive = true
+	if err := saveSettings(settings); err != nil {
+		return fmt.Errorf("could not record the previous proxy settings: %w", err)
+	}
+
+	address := fmt.Sprintf("%s:%d", config.LHost, config.HTTPPort)
+	if err := applySystemProxy(address); err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	a.systemProxyApplied = true
+	a.mu.Unlock()
+
+	log.Println("[INFO] System proxy now points at", address)
+	return nil
+}
+
+// disableSystemProxy restores the settings captured by enableSystemProxy.
+func (a *App) disableSystemProxy() {
+	a.mu.Lock()
+	applied := a.systemProxyApplied
+	a.systemProxyApplied = false
+	a.mu.Unlock()
+
+	settings := loadSettings()
+	if !applied && !settings.SystemProxyActive {
+		return
+	}
+
+	if err := restoreSystemProxy(settings.SavedSystemProxy); err != nil {
+		log.Println("[WARN] Could not restore the previous system proxy settings:", err)
+		// Leave the recovery flag set so the next launch tries again.
+		return
+	}
+
+	settings.SystemProxyActive = false
+	if err := saveSettings(settings); err != nil {
+		log.Println("[WARN] Could not clear the system proxy record:", err)
+	}
+	log.Println("[INFO] System proxy settings restored")
 }
 
 // startProxyLocked performs the part of starting that mutates App state.
@@ -215,10 +306,19 @@ func (a *App) startProxyLocked(config ProxyConfig) error {
 		return err
 	}
 
+	if config.HTTPPort > 0 {
+		if err := d.StartHTTP(config.LHost, config.HTTPPort); err != nil {
+			// Leave nothing half-started: the SOCKS listener is already up.
+			d.Stop()
+			return err
+		}
+	}
+
 	a.disp = d
 	a.tunnel = config.Tunnel
 	a.lhost = config.LHost
 	a.lport = config.LPort
+	a.httpPort = config.HTTPPort
 
 	go a.streamStats(d)
 
@@ -254,6 +354,10 @@ func (a *App) StopProxy() error {
 	// Stop the monitor before taking a.mu: it waits for the monitor
 	// goroutine to finish, and that goroutine acquires a.mu itself.
 	a.stopAutoMode()
+
+	// Hand the system back its own settings before the listener goes away,
+	// so there is no window where traffic is aimed at a dead port.
+	a.disableSystemProxy()
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -330,6 +434,9 @@ type AppSettings struct {
 	StartAtLoginSupport bool `json:"startAtLoginSupported"`
 	StartProxyOnLaunch  bool `json:"startProxyOnLaunch"`
 	AutoMode            bool `json:"autoMode"`
+	// SystemProxySupported gates the UI option: only Windows can be
+	// reconfigured from here.
+	SystemProxySupported bool `json:"systemProxySupported"`
 }
 
 // GetSettings reports the persisted preferences, reading the startup entry
@@ -346,10 +453,11 @@ func (a *App) GetSettings() AppSettings {
 	}
 
 	return AppSettings{
-		StartAtLogin:        atLogin,
-		StartAtLoginSupport: autostartSupported(),
-		StartProxyOnLaunch:  settings.StartProxyOnLaunch,
-		AutoMode:            settings.AutoMode,
+		StartAtLogin:         atLogin,
+		StartAtLoginSupport:  autostartSupported(),
+		StartProxyOnLaunch:   settings.StartProxyOnLaunch,
+		AutoMode:             settings.AutoMode,
+		SystemProxySupported: systemProxySupported(),
 	}
 }
 
@@ -390,6 +498,11 @@ type Status struct {
 	ListenAddr    string                    `json:"listenAddr"`
 	LoadBalancers []dispatcher.LoadBalancer `json:"loadBalancers"`
 	AutoMode      bool                      `json:"autoMode"`
+	// HTTPAddr is the HTTP proxy address to enter in system settings, or ""
+	// when only SOCKS5 is being served.
+	HTTPAddr string `json:"httpAddr"`
+	// SystemProxy reports whether the OS is currently pointed at us.
+	SystemProxy bool `json:"systemProxy"`
 }
 
 // GetStatus reports whether the proxy is running and its current stats.
@@ -404,10 +517,18 @@ func (a *App) GetStatus() Status {
 	if a.disp == nil || !a.disp.IsRunning() {
 		return Status{Running: false, AutoMode: autoOn}
 	}
+
+	httpAddr := ""
+	if a.httpPort > 0 {
+		httpAddr = fmt.Sprintf("%s:%d", a.lhost, a.httpPort)
+	}
+
 	return Status{
 		Running:       true,
 		ListenAddr:    fmt.Sprintf("%s:%d", a.lhost, a.lport),
 		LoadBalancers: a.disp.Stats(),
 		AutoMode:      autoOn,
+		HTTPAddr:      httpAddr,
+		SystemProxy:   a.systemProxyApplied,
 	}
 }
