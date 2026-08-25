@@ -17,7 +17,14 @@ const internetSettingsKey = `Software\Microsoft\Windows\CurrentVersion\Internet 
 
 // defaultBypass keeps local addresses off the proxy. Without <local>, even
 // intranet hosts would be sent through the dispatcher.
-const defaultBypass = "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>"
+//
+// The msftconnecttest/msftncsi entries matter beyond tidiness: Windows uses
+// them to decide whether the machine has internet access. Several are
+// IPv6-only, which this IPv4-only dispatcher cannot reach, so proxying them
+// makes Windows report "No internet access" and can make Store apps refuse
+// to run even while browsing works. Sending those probes direct avoids it.
+const defaultBypass = "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;" +
+	"*.msftconnecttest.com;*.msftncsi.com;disabled.invalid;<local>"
 
 // WinINET option codes for refreshing live settings.
 const (

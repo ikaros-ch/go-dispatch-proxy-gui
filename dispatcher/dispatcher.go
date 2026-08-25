@@ -462,3 +462,34 @@ func (d *Dispatcher) setLastError(lb *LoadBalancer, message string) {
 	defer d.mu.Unlock()
 	lb.LastError = message
 }
+
+// isDestinationError reports whether err describes a problem with the
+// requested destination rather than with the link we dispatched over.
+//
+// A name that does not resolve, or that resolves only to addresses this
+// IPv4-only dispatcher cannot use, says nothing about the health of the
+// interface. Windows constantly probes hosts like ipv6.msftconnecttest.com
+// and the deliberately unresolvable disabled.invalid, so attributing those
+// to a load balancer would show a permanent error against a healthy link.
+func isDestinationError(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var addrErr *net.AddrError
+	return errors.As(err, &addrErr)
+}
+
+// recordDialFailure logs a failed dial and, when the link itself is at
+// fault, records it against the load balancer so the UI can surface it.
+func (d *Dispatcher) recordDialFailure(lb *LoadBalancer, i int, destination string, err error) {
+	if isDestinationError(err) {
+		// Left off the load balancer deliberately: the destination is at
+		// fault, not this link.
+		log.Println("[DEBUG] could not resolve", destination, fmt.Sprintf("{%s}", err))
+		return
+	}
+
+	d.setLastError(lb, err.Error())
+	log.Println("[WARN]", destination, "->", lb.Address, fmt.Sprintf("{%s}", err), "LB:", i)
+}

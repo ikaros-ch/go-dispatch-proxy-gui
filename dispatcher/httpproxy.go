@@ -44,8 +44,7 @@ func (d *Dispatcher) handleHTTPConnect(conn net.Conn, req *http.Request) {
 	lb, i := d.getLoadBalancer()
 	remoteConn, err := dialFromLB(lb, i, address)
 	if err != nil {
-		d.setLastError(lb, err.Error())
-		log.Println("[WARN]", address, "->", lb.Address, fmt.Sprintf("{%s}", err), "LB:", i)
+		d.recordDialFailure(lb, i, address, err)
 		writeHTTPError(conn, http.StatusBadGateway)
 		conn.Close()
 		return
@@ -79,8 +78,7 @@ func (d *Dispatcher) handleHTTPForward(conn net.Conn, reader *bufio.Reader, req 
 	lb, i := d.getLoadBalancer()
 	remoteConn, err := dialFromLB(lb, i, address)
 	if err != nil {
-		d.setLastError(lb, err.Error())
-		log.Println("[WARN]", address, "->", lb.Address, fmt.Sprintf("{%s}", err), "LB:", i)
+		d.recordDialFailure(lb, i, address, err)
 		writeHTTPError(conn, http.StatusBadGateway)
 		conn.Close()
 		return

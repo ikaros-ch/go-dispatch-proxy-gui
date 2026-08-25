@@ -2,7 +2,6 @@
 package dispatcher
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"sync/atomic"
@@ -16,8 +15,7 @@ func (d *Dispatcher) serverResponse(localConn net.Conn, remoteAddress string) {
 
 	remoteConn, err := dialFromLB(lb, i, remoteAddress)
 	if err != nil {
-		d.setLastError(lb, err.Error())
-		log.Println("[WARN]", remoteAddress, "->", lb.Address, fmt.Sprintf("{%s}", err), "LB:", i)
+		d.recordDialFailure(lb, i, remoteAddress, err)
 		localConn.Write([]byte{5, NETWORK_UNREACHABLE, 0, 1, 0, 0, 0, 0, 0, 0})
 		localConn.Close()
 		return
