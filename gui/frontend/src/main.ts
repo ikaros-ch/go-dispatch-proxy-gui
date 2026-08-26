@@ -12,6 +12,9 @@ import {
     SetStartAtLogin,
     SetStartProxyOnLaunch,
     SetAutoMode,
+    SetFailureHandling,
+    SetConnectionExcluded,
+    TestNotification,
 } from '../wailsjs/go/main/App';
 import {main, dispatcher} from '../wailsjs/go/models';
 import {EventsOn} from '../wailsjs/runtime/runtime';
@@ -57,6 +60,11 @@ let proxyTestError = '';
 let systemProxySupported = false;
 let httpAddr = '';
 let systemProxyActive = false;
+
+// What to do when a connection stops responding, and whether to be told.
+let failureAction = 'exclude';
+let notifyOnFailure = false;
+let notificationsSupported = false;
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
@@ -176,7 +184,46 @@ async function loadSettings() {
     startProxyOnLaunch = settings.startProxyOnLaunch;
     autoMode = settings.autoMode;
     systemProxySupported = settings.systemProxySupported;
+    failureAction = settings.failureAction;
+    notifyOnFailure = settings.notifyOnFailure;
+    notificationsSupported = settings.notificationsSupported;
     render();
+}
+
+// applyFailureHandling saves the choice and applies it to a running proxy.
+async function applyFailureHandling(action: string, notify: boolean) {
+    const previousAction = failureAction;
+    const previousNotify = notifyOnFailure;
+    failureAction = action;
+    notifyOnFailure = notify;
+    try {
+        await SetFailureHandling(action, notify);
+    } catch (err: any) {
+        startError = String(err?.message ?? err);
+        failureAction = previousAction;
+        notifyOnFailure = previousNotify;
+    }
+    render();
+}
+
+// setExcluded overrides the automatic decision for one connection.
+async function setExcluded(address: string, excluded: boolean) {
+    try {
+        await SetConnectionExcluded(address, excluded);
+        await refreshStatus();
+    } catch (err: any) {
+        startError = String(err?.message ?? err);
+        render();
+    }
+}
+
+async function sendTestNotification() {
+    try {
+        await TestNotification();
+    } catch (err: any) {
+        startError = String(err?.message ?? err);
+        render();
+    }
 }
 
 async function toggleStartAtLogin(enabled: boolean) {
@@ -285,17 +332,58 @@ async function refreshStatus() {
 
 const logLines: string[] = [];
 
+// The log follows new lines only while the reader is already at the bottom.
+// Scrolling up to read something is a deliberate act, and yanking the view
+// back down on the next line makes older entries impossible to read.
+let logFollowing = true;
+let logScrollTop = 0;
+
+// atBottom allows a small margin so a near-bottom position still counts as
+// following, which matches what the reader perceives.
+function atBottom(el: HTMLElement): boolean {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+}
+
+// rememberLogScroll records the position before the DOM is rebuilt.
+function rememberLogScroll() {
+    const el = document.querySelector<HTMLPreElement>('#log');
+    if (!el) return;
+    logScrollTop = el.scrollTop;
+    logFollowing = atBottom(el);
+}
+
+// restoreLogScroll puts the reader back where they were, or pins to the
+// bottom when they were following.
+function restoreLogScroll() {
+    const el = document.querySelector<HTMLPreElement>('#log');
+    if (!el) return;
+    el.scrollTop = logFollowing ? el.scrollHeight : logScrollTop;
+}
+
 function appendLog(line: string) {
     logLines.push(line);
     if (logLines.length > 400) logLines.splice(0, logLines.length - 400);
+
     const el = document.querySelector<HTMLPreElement>('#log');
-    if (el) {
-        el.textContent = logLines.join('\n');
-        el.scrollTop = el.scrollHeight;
-    }
+    if (!el) return;
+
+    // Decide before the content grows, otherwise the new text has already
+    // moved the bottom out from under the current position.
+    const wasFollowing = atBottom(el);
+    const previousTop = el.scrollTop;
+
+    el.textContent = logLines.join('\n');
+
+    el.scrollTop = wasFollowing ? el.scrollHeight : previousTop;
+    logFollowing = wasFollowing;
+    logScrollTop = el.scrollTop;
 }
 
 function render() {
+    // A stats tick rebuilds this markup every second; without capturing the
+    // log position first, that alone would scroll the reader to the bottom.
+    rememberLogScroll();
+
     app.innerHTML = `
         <h1>Go Dispatch Proxy</h1>
 
@@ -429,6 +517,25 @@ function render() {
                 </label>
                 <span class="hint">Restores the last saved configuration without opening anything.</span>
             </div>
+
+            <div class="row">
+                <label>When a connection stops responding</label>
+                <select id="failure-action">
+                    <option value="exclude" ${failureAction === 'exclude' ? 'selected' : ''}>Stop using it until it recovers</option>
+                    <option value="notify" ${failureAction === 'notify' ? 'selected' : ''}>Keep using it, just tell me</option>
+                    <option value="ignore" ${failureAction === 'ignore' ? 'selected' : ''}>Do nothing</option>
+                </select>
+            </div>
+            <p class="hint">A connection is considered failed after 3 failures in a row; any success resets the count. Excluded connections are re-tested every 30 seconds and used again as soon as they respond.</p>
+            <div class="row">
+                <label title="${notificationsSupported ? '' : 'Desktop notifications are available on Windows only.'}">
+                    <input type="checkbox" id="notify-on-failure" ${notifyOnFailure ? 'checked' : ''} ${notificationsSupported && failureAction !== 'ignore' ? '' : 'disabled'}/>
+                    Show a desktop notification
+                </label>
+                ${notificationsSupported
+        ? `<button data-action="test-notification" ${notifyOnFailure ? '' : 'disabled'}>Send a test</button>`
+        : '<span class="hint">Not available on this platform.</span>'}
+            </div>
         </div>
 
         ${running && liveStats.length > 0 ? `
@@ -436,12 +543,19 @@ function render() {
             <h2>Live stats</h2>
             <table>
                 <thead>
-                    <tr><th>Address</th><th>Ratio</th><th>Connections</th><th>Sent</th><th>Received</th><th>Last error</th></tr>
+                    <tr><th>Address</th><th>Status</th><th>Ratio</th><th>Connections</th><th>Sent</th><th>Received</th><th>Last error</th></tr>
                 </thead>
                 <tbody>
                     ${liveStats.map(lb => `
                         <tr>
                             <td class="mono">${escapeHtml(lb.Address)}</td>
+                            <td>
+                                ${lb.Excluded
+        ? `<span class="error-text" title="${escapeHtml(lb.ExcludedReason ?? '')}">Excluded</span>
+                                       <button class="link" data-action="include" data-address="${escapeHtml(lb.Address)}">Use again</button>`
+        : `<span class="status-dot on"></span>In use
+                                       <button class="link" data-action="exclude" data-address="${escapeHtml(lb.Address)}">Exclude</button>`}
+                            </td>
                             <td class="mono">${lb.ContentionRatio}</td>
                             <td class="mono">${lb.ConnectionsHandled}</td>
                             <td class="mono">${fmtBytes(lb.BytesSent)}</td>
@@ -460,9 +574,7 @@ function render() {
     `;
 
     wireEvents();
-
-    const logEl = document.querySelector<HTMLPreElement>('#log');
-    if (logEl) logEl.scrollTop = logEl.scrollHeight;
+    restoreLogScroll();
 }
 
 function rowHtml(row: Row): string {
@@ -514,6 +626,9 @@ function wireEvents() {
             else if (action === 'remove-row' && rowId) removeRow(rowId);
             else if (action === 'test') runTests();
             else if (action === 'test-proxy') runProxyTest();
+            else if (action === 'test-notification') sendTestNotification();
+            else if (action === 'include' && el.dataset.address) setExcluded(el.dataset.address, false);
+            else if (action === 'exclude' && el.dataset.address) setExcluded(el.dataset.address, true);
             else if (action === 'apply-suggested') applySuggested();
             else if (action === 'start') start();
             else if (action === 'stop') stop();
@@ -551,6 +666,17 @@ function wireEvents() {
     const systemProxyEl = document.querySelector<HTMLInputElement>('#system-proxy');
     systemProxyEl?.addEventListener('change', () => systemProxy = systemProxyEl.checked);
 
+    const logEl = document.querySelector<HTMLPreElement>('#log');
+    logEl?.addEventListener('scroll', () => {
+        logFollowing = atBottom(logEl);
+        logScrollTop = logEl.scrollTop;
+    });
+
+    const failureActionEl = document.querySelector<HTMLSelectElement>('#failure-action');
+    failureActionEl?.addEventListener('change', () => applyFailureHandling(failureActionEl.value, notifyOnFailure));
+    const notifyEl = document.querySelector<HTMLInputElement>('#notify-on-failure');
+    notifyEl?.addEventListener('change', () => applyFailureHandling(failureAction, notifyEl.checked));
+
     const autoEl = document.querySelector<HTMLInputElement>('#auto-mode');
     autoEl?.addEventListener('change', () => toggleAutoMode(autoEl.checked));
     const loginEl = document.querySelector<HTMLInputElement>('#start-at-login');
@@ -572,6 +698,10 @@ EventsOn('autoUpdate', (stats: dispatcher.LoadBalancer[]) => {
     loadInterfaces();
     refreshStatus();
 });
+
+// A connection was excluded or restored; reflect it immediately rather than
+// waiting for the next stats tick.
+EventsOn('health', () => refreshStatus());
 
 loadInterfaces();
 refreshStatus();

@@ -26,6 +26,9 @@ export namespace dispatcher {
 	    BytesReceived: number;
 	    ConnectionsHandled: number;
 	    LastError: string;
+	    Excluded: boolean;
+	    ExcludedReason: string;
+	    ConsecutiveFailures: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new LoadBalancer(source);
@@ -42,6 +45,9 @@ export namespace dispatcher {
 	        this.BytesReceived = source["BytesReceived"];
 	        this.ConnectionsHandled = source["ConnectionsHandled"];
 	        this.LastError = source["LastError"];
+	        this.Excluded = source["Excluded"];
+	        this.ExcludedReason = source["ExcludedReason"];
+	        this.ConsecutiveFailures = source["ConsecutiveFailures"];
 	    }
 	}
 	export class TestResult {
@@ -79,6 +85,9 @@ export namespace main {
 	    startProxyOnLaunch: boolean;
 	    autoMode: boolean;
 	    systemProxySupported: boolean;
+	    failureAction: string;
+	    notifyOnFailure: boolean;
+	    notificationsSupported: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppSettings(source);
@@ -91,6 +100,9 @@ export namespace main {
 	        this.startProxyOnLaunch = source["startProxyOnLaunch"];
 	        this.autoMode = source["autoMode"];
 	        this.systemProxySupported = source["systemProxySupported"];
+	        this.failureAction = source["failureAction"];
+	        this.notifyOnFailure = source["notifyOnFailure"];
+	        this.notificationsSupported = source["notificationsSupported"];
 	    }
 	}
 	export class LBConfig {

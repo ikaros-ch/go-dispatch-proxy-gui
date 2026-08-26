@@ -21,6 +21,13 @@ type Settings struct {
 	// LastConfig is the configuration to restore.
 	LastConfig ProxyConfig `json:"lastConfig"`
 
+	// FailureAction decides what happens when a connection stops
+	// responding: "exclude" takes it out of rotation until it recovers,
+	// "notify" leaves it in use and only reports, "ignore" does neither.
+	FailureAction string `json:"failureAction"`
+	// NotifyOnFailure shows a desktop notification for those events.
+	NotifyOnFailure bool `json:"notifyOnFailure"`
+
 	// SystemProxyActive records that we changed the OS proxy settings and
 	// have not put them back yet. If the app is killed before it can
 	// restore them, the next launch uses this to repair the settings --
@@ -79,4 +86,26 @@ func saveSettings(s Settings) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// Failure actions. These are the values FailureAction may take.
+const (
+	// FailureActionExclude stops dispatching over a link that keeps
+	// failing, until a health probe shows it working again.
+	FailureActionExclude = "exclude"
+	// FailureActionNotify keeps using the link and only reports.
+	FailureActionNotify = "notify"
+	// FailureActionIgnore does neither.
+	FailureActionIgnore = "ignore"
+)
+
+// normalisedFailureAction returns the configured action, defaulting to
+// excluding failing links, which is what most people want.
+func (s Settings) normalisedFailureAction() string {
+	switch s.FailureAction {
+	case FailureActionNotify, FailureActionIgnore, FailureActionExclude:
+		return s.FailureAction
+	default:
+		return FailureActionExclude
+	}
 }

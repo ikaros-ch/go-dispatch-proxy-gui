@@ -314,6 +314,14 @@ func (a *App) startProxyLocked(config ProxyConfig) error {
 		}
 	}
 
+	// Health handling is configured before anything can fail.
+	settings := loadSettings()
+	action := settings.normalisedFailureAction()
+	d.SetAutoExclude(action == FailureActionExclude)
+	d.OnHealthChange(func(event dispatcher.HealthEvent) {
+		a.handleHealthEvent(event, action, settings.NotifyOnFailure)
+	})
+
 	a.disp = d
 	a.tunnel = config.Tunnel
 	a.lhost = config.LHost
@@ -323,6 +331,35 @@ func (a *App) startProxyLocked(config ProxyConfig) error {
 	go a.streamStats(d)
 
 	return nil
+}
+
+// handleHealthEvent reacts to a connection failing or recovering: it tells
+// the UI, optionally raises a desktop notification, and applies the action
+// the user chose.
+func (a *App) handleHealthEvent(event dispatcher.HealthEvent, action string, notify bool) {
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "health", event)
+	}
+
+	if action == FailureActionIgnore {
+		return
+	}
+
+	title := "Connection restored"
+	body := fmt.Sprintf("%s is responding again and is back in use.", event.Address)
+	if event.Excluded {
+		title = "Connection excluded"
+		body = fmt.Sprintf("%s stopped responding and is no longer being used. %s", event.Address, event.Reason)
+	} else if action == FailureActionNotify && event.Reason != "" && event.Reason != "responding again" {
+		// Reported without being excluded: the link is still carrying
+		// traffic, which the wording has to make clear.
+		title = "Connection failing"
+		body = fmt.Sprintf("%s keeps failing but is still in use. %s", event.Address, event.Reason)
+	}
+
+	if notify && notificationsSupported() {
+		showNotification(title, body)
+	}
 }
 
 // persistConfig records the configuration that is now running so it can be
@@ -437,6 +474,11 @@ type AppSettings struct {
 	// SystemProxySupported gates the UI option: only Windows can be
 	// reconfigured from here.
 	SystemProxySupported bool `json:"systemProxySupported"`
+	// FailureAction and NotifyOnFailure control what happens when a
+	// connection stops responding.
+	FailureAction        string `json:"failureAction"`
+	NotifyOnFailure      bool   `json:"notifyOnFailure"`
+	NotificationsSupport bool   `json:"notificationsSupported"`
 }
 
 // GetSettings reports the persisted preferences, reading the startup entry
@@ -458,6 +500,9 @@ func (a *App) GetSettings() AppSettings {
 		StartProxyOnLaunch:   settings.StartProxyOnLaunch,
 		AutoMode:             settings.AutoMode,
 		SystemProxySupported: systemProxySupported(),
+		FailureAction:        settings.normalisedFailureAction(),
+		NotifyOnFailure:      settings.NotifyOnFailure,
+		NotificationsSupport: notificationsSupported(),
 	}
 }
 
@@ -490,6 +535,49 @@ func (a *App) SetStartProxyOnLaunch(enabled bool) error {
 	settings := loadSettings()
 	settings.StartProxyOnLaunch = enabled
 	return saveSettings(settings)
+}
+
+// SetFailureHandling chooses what happens when a connection stops
+// responding, and whether a desktop notification is shown. It applies to the
+// running proxy immediately.
+func (a *App) SetFailureHandling(action string, notify bool) error {
+	settings := loadSettings()
+	settings.FailureAction = action
+	settings.NotifyOnFailure = notify
+	normalised := settings.normalisedFailureAction()
+	settings.FailureAction = normalised
+
+	if err := saveSettings(settings); err != nil {
+		return err
+	}
+
+	if disp, _ := a.currentDispatcher(); disp != nil {
+		disp.SetAutoExclude(normalised == FailureActionExclude)
+		disp.OnHealthChange(func(event dispatcher.HealthEvent) {
+			a.handleHealthEvent(event, normalised, notify)
+		})
+	}
+	return nil
+}
+
+// SetConnectionExcluded excludes or restores one connection by address,
+// overriding the automatic decision.
+func (a *App) SetConnectionExcluded(address string, excluded bool) error {
+	disp, _ := a.currentDispatcher()
+	if disp == nil {
+		return fmt.Errorf("the proxy is not running")
+	}
+	return disp.SetExcluded(address, excluded)
+}
+
+// TestNotification shows a sample notification so the user can confirm they
+// are working, and grant permission if Windows asks.
+func (a *App) TestNotification() error {
+	if !notificationsSupported() {
+		return fmt.Errorf("desktop notifications are not supported on this platform")
+	}
+	showNotification("Go Dispatch Proxy", "Notifications are working.")
+	return nil
 }
 
 // Status is a snapshot of the current proxy state for the frontend.

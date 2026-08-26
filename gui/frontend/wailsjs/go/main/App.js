@@ -18,6 +18,14 @@ export function SetAutoMode(arg1) {
   return window['go']['main']['App']['SetAutoMode'](arg1);
 }
 
+export function SetConnectionExcluded(arg1, arg2) {
+  return window['go']['main']['App']['SetConnectionExcluded'](arg1, arg2);
+}
+
+export function SetFailureHandling(arg1, arg2) {
+  return window['go']['main']['App']['SetFailureHandling'](arg1, arg2);
+}
+
 export function SetStartAtLogin(arg1) {
   return window['go']['main']['App']['SetStartAtLogin'](arg1);
 }
@@ -36,6 +44,10 @@ export function StopProxy() {
 
 export function TestConnections(arg1) {
   return window['go']['main']['App']['TestConnections'](arg1);
+}
+
+export function TestNotification() {
+  return window['go']['main']['App']['TestNotification']();
 }
 
 export function TestProxy() {

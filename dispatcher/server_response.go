@@ -13,7 +13,7 @@ import (
 func (d *Dispatcher) serverResponse(localConn net.Conn, remoteAddress string) {
 	lb, i, err := d.selectLoadBalancer(remoteAddress)
 	if err != nil {
-		log.Println("[WARN]", remoteAddress, "cannot be dispatched:", err)
+		logSelectionFailure(remoteAddress, err)
 		localConn.Write([]byte{5, NETWORK_UNREACHABLE, 0, 1, 0, 0, 0, 0, 0, 0})
 		localConn.Close()
 		return
@@ -27,6 +27,7 @@ func (d *Dispatcher) serverResponse(localConn net.Conn, remoteAddress string) {
 		return
 	}
 
+	d.recordDialSuccess(lb)
 	atomic.AddUint64(&lb.ConnectionsHandled, 1)
 	log.Println("[DEBUG]", remoteAddress, "->", lb.Address, "LB:", i)
 	localConn.Write([]byte{5, SUCCESS, 0, 1, 0, 0, 0, 0, 0, 0})

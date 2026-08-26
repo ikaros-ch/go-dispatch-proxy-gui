@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // LoadBalancer is one upstream address (interface or tunnel endpoint) that
@@ -31,6 +32,17 @@ type LoadBalancer struct {
 	BytesReceived      uint64
 	ConnectionsHandled uint64
 	LastError          string
+
+	// Excluded links are skipped when dispatching. A link is excluded
+	// automatically after repeated failures, or manually by the user, and
+	// restored once it answers a health probe again.
+	Excluded            bool
+	ExcludedReason      string
+	ConsecutiveFailures int
+
+	// reported stops a link that keeps failing from raising the same alert
+	// on every subsequent connection; it is cleared by the next success.
+	reported bool
 }
 
 // Dispatcher owns the set of load balancers and the running SOCKS5/tunnel
@@ -48,6 +60,16 @@ type Dispatcher struct {
 	listener     net.Listener
 	httpListener net.Listener
 	running      bool
+
+	// Health tracking. autoExclude gates whether repeated failures take a
+	// link out of rotation; the health checker restores it when it works
+	// again.
+	autoExclude         bool
+	failureThreshold    int
+	recoveryInterval    time.Duration
+	probeTargetOverride string
+	onHealthChange      func(HealthEvent)
+	healthCancel        context.CancelFunc
 }
 
 // New creates a Dispatcher for the given load balancers. tunnel selects
@@ -200,11 +222,20 @@ func (d *Dispatcher) getLoadBalancerFor(hasV4, hasV6 bool) (*LoadBalancer, int, 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	familyMatch := false
+
 	for scanned := 0; scanned < len(d.lbList); scanned++ {
 		index := d.lbIndex
 		lb := &d.lbList[index]
 
 		if !lb.usableFor(hasV4, hasV6) {
+			d.advanceLocked()
+			continue
+		}
+		familyMatch = true
+
+		// Excluded links have been failing; skip them while they recover.
+		if lb.Excluded {
 			d.advanceLocked()
 			continue
 		}
@@ -215,6 +246,22 @@ func (d *Dispatcher) getLoadBalancerFor(hasV4, hasV6 bool) (*LoadBalancer, int, 
 			d.advanceLocked()
 		}
 		return lb, index, nil
+	}
+
+	if familyMatch {
+		// Something could have carried this, but everything is excluded.
+		// Falling back to a failing link beats refusing outright: the
+		// exclusion may be stale and the request would fail anyway.
+		for scanned := 0; scanned < len(d.lbList); scanned++ {
+			index := d.lbIndex
+			lb := &d.lbList[index]
+			d.advanceLocked()
+
+			if lb.usableFor(hasV4, hasV6) {
+				return lb, index, nil
+			}
+		}
+		return nil, 0, errAllLoadBalancersExcluded
 	}
 
 	return nil, 0, errNoCompatibleLoadBalancer
@@ -338,6 +385,8 @@ func (d *Dispatcher) Start(lhost string, lport int) error {
 
 	log.Println("[INFO] Local server started on", localBindAddress)
 
+	d.startHealthChecks()
+
 	go func() {
 		for {
 			conn, err := l.Accept()
@@ -391,6 +440,8 @@ func (d *Dispatcher) StartHTTP(lhost string, lport int) error {
 
 	log.Println("[INFO] HTTP proxy started on", localBindAddress)
 
+	d.startHealthChecks()
+
 	go func() {
 		for {
 			conn, err := l.Accept()
@@ -424,6 +475,11 @@ func (d *Dispatcher) Stop() error {
 		return nil
 	}
 	d.running = false
+
+	if d.healthCancel != nil {
+		d.healthCancel()
+		d.healthCancel = nil
+	}
 
 	socksListener := d.listener
 	d.listener = nil
@@ -481,6 +537,9 @@ func (d *Dispatcher) UpdateLoadBalancers(lbs []LoadBalancer) error {
 			next[i].BytesReceived = atomic.LoadUint64(&old.BytesReceived)
 			next[i].ConnectionsHandled = atomic.LoadUint64(&old.ConnectionsHandled)
 			next[i].LastError = old.LastError
+			next[i].Excluded = old.Excluded
+			next[i].ExcludedReason = old.ExcludedReason
+			next[i].ConsecutiveFailures = old.ConsecutiveFailures
 		}
 	}
 
@@ -512,14 +571,17 @@ func (d *Dispatcher) Stats() []LoadBalancer {
 	for i := range d.lbList {
 		lb := &d.lbList[i]
 		out[i] = LoadBalancer{
-			Address:            lb.Address,
-			Iface:              lb.Iface,
-			ContentionRatio:    lb.ContentionRatio,
-			CurrentConnections: lb.CurrentConnections,
-			BytesSent:          atomic.LoadUint64(&lb.BytesSent),
-			BytesReceived:      atomic.LoadUint64(&lb.BytesReceived),
-			ConnectionsHandled: atomic.LoadUint64(&lb.ConnectionsHandled),
-			LastError:          lb.LastError,
+			Address:             lb.Address,
+			Iface:               lb.Iface,
+			ContentionRatio:     lb.ContentionRatio,
+			CurrentConnections:  lb.CurrentConnections,
+			BytesSent:           atomic.LoadUint64(&lb.BytesSent),
+			BytesReceived:       atomic.LoadUint64(&lb.BytesReceived),
+			ConnectionsHandled:  atomic.LoadUint64(&lb.ConnectionsHandled),
+			LastError:           lb.LastError,
+			Excluded:            lb.Excluded,
+			ExcludedReason:      lb.ExcludedReason,
+			ConsecutiveFailures: lb.ConsecutiveFailures,
 		}
 	}
 	return out
@@ -563,4 +625,13 @@ func (d *Dispatcher) recordDialFailure(lb *LoadBalancer, i int, destination stri
 
 	d.setLastError(lb, err.Error())
 	log.Println("[WARN]", destination, "->", lb.Address, fmt.Sprintf("{%s}", err), "LB:", i)
+
+	// Repeated failures in a row suggest the link itself, not the
+	// destination; any success resets the streak.
+	d.noteFailure(lb, err.Error())
+}
+
+// recordDialSuccess clears a link's failure streak.
+func (d *Dispatcher) recordDialSuccess(lb *LoadBalancer) {
+	d.noteSuccess(lb)
 }

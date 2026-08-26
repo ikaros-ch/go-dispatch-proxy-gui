@@ -9,20 +9,16 @@ import (
 	"syscall"
 )
 
-// dialFromLB opens a connection to remoteAddress bound to the load
-// balancer's interface. Linux additionally uses SO_BINDTODEVICE, which is
-// what makes dispatching work when several interfaces share a route.
-func dialFromLB(lb *LoadBalancer, i int, remoteAddress string) (net.Conn, error) {
-	// The network is pinned to the link's family: a source bound to one
-	// family cannot reach destinations of the other.
-	network := networkFor(lb.IsIPv6)
-
-	localTCPAddr, err := net.ResolveTCPAddr(network, lb.Address)
+// dialerForLB builds a dialer bound to the load balancer's interface. Linux
+// additionally uses SO_BINDTODEVICE, which is what makes dispatching work
+// when several interfaces share a route.
+func dialerForLB(lb *LoadBalancer, i int) (*net.Dialer, error) {
+	localTCPAddr, err := net.ResolveTCPAddr(networkFor(lb.IsIPv6), lb.Address)
 	if err != nil {
 		return nil, err
 	}
 
-	dialer := net.Dialer{
+	return &net.Dialer{
 		LocalAddr: localTCPAddr,
 		Control: func(network, address string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {
@@ -33,7 +29,5 @@ func dialFromLB(lb *LoadBalancer, i int, remoteAddress string) (net.Conn, error)
 				}
 			})
 		},
-	}
-
-	return dialer.Dial(network, remoteAddress)
+	}, nil
 }

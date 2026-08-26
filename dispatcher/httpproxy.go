@@ -44,7 +44,7 @@ func (d *Dispatcher) handleHTTPConnect(conn net.Conn, req *http.Request) {
 
 	lb, i, err := d.selectLoadBalancer(address)
 	if err != nil {
-		log.Println("[WARN]", address, "cannot be dispatched:", err)
+		logSelectionFailure(address, err)
 		writeHTTPError(conn, http.StatusBadGateway)
 		conn.Close()
 		return
@@ -57,6 +57,8 @@ func (d *Dispatcher) handleHTTPConnect(conn net.Conn, req *http.Request) {
 		conn.Close()
 		return
 	}
+
+	d.recordDialSuccess(lb)
 
 	if _, err := conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		remoteConn.Close()
@@ -108,7 +110,7 @@ func (d *Dispatcher) forwardOneRequest(conn net.Conn, reader *bufio.Reader, req 
 
 	lb, i, err := d.selectLoadBalancer(address)
 	if err != nil {
-		log.Println("[WARN]", address, "cannot be dispatched:", err)
+		logSelectionFailure(address, err)
 		writeHTTPError(conn, http.StatusBadGateway)
 		return false
 	}
@@ -119,6 +121,8 @@ func (d *Dispatcher) forwardOneRequest(conn net.Conn, reader *bufio.Reader, req 
 		writeHTTPError(conn, http.StatusBadGateway)
 		return false
 	}
+	d.recordDialSuccess(lb)
+
 	// Byte counters are maintained by the wrapper rather than by
 	// pipeConnections, which is not used on this path.
 	counted := newCountingConn(remoteConn, lb)

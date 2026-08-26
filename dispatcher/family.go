@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"time"
 )
@@ -13,6 +14,14 @@ import (
 // reachable over an address family none of the configured load balancers
 // can provide -- typically an IPv6-only host with IPv4-only links.
 var errNoCompatibleLoadBalancer = errors.New("no load balancer can reach this destination's address family")
+
+// errAllLoadBalancersExcluded is returned when every link that could carry a
+// destination has been taken out of rotation for failing.
+var errAllLoadBalancersExcluded = errors.New("all connections that could reach this destination are currently excluded")
+
+// errUnknownLoadBalancer is returned when an address does not match any
+// configured link.
+var errUnknownLoadBalancer = errors.New("no such connection")
 
 // familyLookupTimeout bounds the name resolution done to decide which
 // address families a destination offers.
@@ -90,4 +99,15 @@ func (lb *LoadBalancer) usableFor(hasV4, hasV6 bool) bool {
 		return hasV6
 	}
 	return hasV4
+}
+
+// logSelectionFailure reports why a destination could not be dispatched,
+// keeping the routine noise of unresolvable probe hostnames out of the
+// warning stream. Windows queries names like ipv6.msftncsi.com constantly.
+func logSelectionFailure(destination string, err error) {
+	if isDestinationError(err) {
+		log.Println("[DEBUG] could not resolve", destination, fmt.Sprintf("{%s}", err))
+		return
+	}
+	log.Println("[WARN]", destination, "cannot be dispatched:", err)
 }
